@@ -1,0 +1,131 @@
+{
+  "_comment": "Canonical company expense P&L chart - source of truth for scripts/seed.ts and, later, hf-mcp's expense_summary. Primary categories match the table in HF-erp's docs/expense-ledger-plan.md ('The canonical P&L expense chart'). Transactions attach to SECONDARY categories only - every primary that isn't building-scoped gets exactly one secondary carrying the same Thai label as the primary, purely so it has somewhere to post a transaction. icon/color values are numeric icon ids and 6-digit hex colors verified against ezBookkeeping v1.6.1 (src/consts/icon.ts ALL_CATEGORY_ICONS / ALL_ACCOUNT_ICONS, src/consts/color.ts allAvailableColors).",
+  "primaries": [
+    {
+      "code": "salary",
+      "label": "เงินเดือนพนักงาน",
+      "icon": "930",
+      "color": "009688",
+      "secondaries": ["เงินเดือนพนักงาน"]
+    },
+    {
+      "code": "commission-staff",
+      "label": "ค่าคอมมิชชั่นพนักงาน",
+      "icon": "970",
+      "color": "8e8e93",
+      "secondaries": ["ค่าคอมมิชชั่นพนักงาน"]
+    },
+    {
+      "code": "commission-booking",
+      "label": "ค่าคอมมิชชั่น BOOKING",
+      "icon": "970",
+      "color": "2196f3",
+      "secondaries": ["ค่าคอมมิชชั่น BOOKING"]
+    },
+    {
+      "code": "commission-expedia",
+      "label": "ค่าคอมมิชชั่น expedia group",
+      "icon": "970",
+      "color": "673ab7",
+      "secondaries": ["ค่าคอมมิชชั่น expedia group"]
+    },
+    {
+      "code": "breakfast",
+      "label": "ค่าอาหารเช้า",
+      "icon": "1",
+      "color": "ff9500",
+      "secondaries": ["ค่าอาหารเช้า"]
+    },
+    {
+      "code": "housekeeping",
+      "label": "ค่าใช้จ่าย-แม่บ้าน",
+      "icon": "260",
+      "color": "5ac8fa",
+      "secondaries": ["ค่าใช้จ่าย-แม่บ้าน"]
+    },
+    {
+      "code": "water-bar",
+      "label": "ค่าใช้จ่าย-บาร์น้ำ",
+      "icon": "32",
+      "color": "9c27b0",
+      "secondaries": ["ค่าใช้จ่าย-บาร์น้ำ"]
+    },
+    {
+      "code": "repair-appliance",
+      "label": "ค่าซ่อมแซม-เครื่องใช้ไฟฟ้า",
+      "icon": "252",
+      "color": "ff6b22",
+      "secondaries": ["ค่าซ่อมแซม-เครื่องใช้ไฟฟ้า"]
+    },
+    {
+      "code": "water-utility",
+      "label": "ค่าน้ำประปา",
+      "icon": "270",
+      "color": "2196f3",
+      "secondaries": ["สายชล", "Hop inn 47", "HF Ville"]
+    },
+    {
+      "code": "electricity",
+      "label": "ค่าไฟฟ้า",
+      "icon": "231",
+      "color": "ffcc00",
+      "secondaries": ["สายชล", "HF Ville", "Hop inn 47"]
+    },
+    {
+      "code": "phone",
+      "label": "ค่าโทรศัพท์",
+      "icon": "400",
+      "color": "4cd964",
+      "secondaries": ["สายชล+ออฟฟิต", "HF Ville"]
+    },
+    {
+      "code": "laundry",
+      "label": "ค่าซักผ้า",
+      "icon": "110",
+      "color": "cddc39",
+      "secondaries": ["ค่าซักผ้า"]
+    },
+    {
+      "code": "repair-building",
+      "label": "ค่าซ่อมแซม-อาคาร",
+      "icon": "250",
+      "color": "ff3b30",
+      "secondaries": ["ค่าซ่อมแซม-อาคาร"]
+    },
+    {
+      "code": "supplies",
+      "label": "ค่าวัสดุสิ้นเปลือง/อุปกรณ์สำนักงาน",
+      "icon": "5101",
+      "color": "8e8e93",
+      "secondaries": ["ค่าวัสดุสิ้นเปลือง/อุปกรณ์สำนักงาน"]
+    },
+    {
+      "code": "social-security",
+      "label": "ค่าเงินสมทบประกันสังคม",
+      "icon": "960",
+      "color": "000000",
+      "secondaries": ["ค่าเงินสมทบประกันสังคม"]
+    },
+    {
+      "code": "other",
+      "label": "ค่าใช้จ่ายอื่นๆ",
+      "icon": "1010",
+      "color": "8e8e93",
+      "secondaries": ["ค่าใช้จ่ายอื่นๆ"]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "เงินสด",
+      "category": "cash",
+      "icon": "1",
+      "color": "4cd964"
+    },
+    {
+      "name": "ธนาคาร",
+      "category": "checking",
+      "icon": "100",
+      "color": "2196f3"
+    }
+  ]
+}

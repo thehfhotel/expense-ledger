@@ -96,6 +96,60 @@ account:
 4. Set `EBK_USER_ENABLE_REGISTER` back to `false` (the compose default) and
    redeploy, so the registration page can never create a second account.
 
+## Migration runbook
+
+One-time (or monthly, for a new month's workbook) steps to seed the chart of
+accounts/categories and import a paper Excel workbook into the engine.
+`scripts/seed.ts` and `scripts/import-workbook.ts` are plain `bun` scripts —
+they talk to the engine directly over its loopback host-port mapping
+(`127.0.0.1:4051`), the same way an operator reaches it in the "First-boot
+procedure" above (from evergreen itself, or an SSH tunnel from your laptop).
+They read `EBK_URL` (defaults to `http://127.0.0.1:4051`) and `EBK_TOKEN` —
+`EBK_TOKEN` can be the exact same API token minted in first-boot step 3
+(the one set as the `ENGINE_API_TOKEN` GitHub secret); it's just exported
+under a different env var name here because these scripts run from an
+operator's shell, not inside the frontend container. Both scripts default to
+a dry-run that only reads from the engine and prints a plan — pass `--apply`
+to actually write.
+
+Exact order:
+
+1. **Engine up.** `docker compose up -d engine` (or confirm it's already
+   running: `docker compose ps`).
+2. **Registration temporarily on** — see "First-boot procedure" step 1.
+3. **Create the ledger user** through ezBookkeeping's own UI over
+   `127.0.0.1:4051` — "First-boot procedure" step 2.
+4. **Mint a token** — Settings > API token in that UI ("First-boot
+   procedure" step 3). Export it locally:
+   ```sh
+   export EBK_URL=http://127.0.0.1:4051   # or your SSH tunnel's local port
+   export EBK_TOKEN=<the token you just minted>
+   ```
+5. **Seed the chart of accounts/categories** (idempotent — safe to re-run):
+   ```sh
+   bun scripts/seed.ts            # dry-run: prints what it would create
+   bun scripts/seed.ts --apply    # creates the 16 primary + secondary
+                                   # expense categories and the two
+                                   # accounts (เงินสด, ธนาคาร) from
+                                   # scripts/categories.json
+   ```
+6. **Import the month's workbook:**
+   ```sh
+   bun scripts/import-workbook.ts --file <path-to-workbook.xlsx>            # dry-run
+   bun scripts/import-workbook.ts --file <path-to-workbook.xlsx> --apply    # writes + reconciles
+   ```
+   Re-importing the same month refuses with a clear error unless you pass
+   `--force` (which first deletes exactly that month's previously-imported
+   transactions, identified by their `import:<YYYY-MM>` tag, before
+   re-importing).
+7. **The reconciliation table printed at the end of `--apply` must be
+   all-zero diffs.** If any row shows a nonzero diff, the script exits 1 —
+   treat that month as NOT safely imported until it's investigated (the
+   likely causes are a categories.json / column mapping drift, or a
+   partially-failed write) and re-run with `--force` once fixed.
+8. **Registration off** — set `EBK_USER_ENABLE_REGISTER` back to `false` and
+   redeploy, exactly as in "First-boot procedure" step 4.
+
 ## Upgrade procedure (engine)
 
 The engine image is consumed from our own GHCR mirror, pinned by digest in
