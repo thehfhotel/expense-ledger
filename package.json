@@ -1,0 +1,17 @@
+{
+  "name": "expense-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server/server.ts",
+    "build": "bun scripts/build.ts",
+    "start": "NODE_ENV=production bun src/server/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

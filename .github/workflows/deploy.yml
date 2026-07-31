@@ -1,0 +1,161 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Mirrors the estate's forced-command SSH deploy pattern (income-ledger,
+# hf-erp-portal, payroll, room-daily-reporter):
+#   - Build the frontend image on a GH-hosted ubuntu-latest runner
+#   - Push to ghcr.io/thehfhotel/expense-ledger
+#   - Deploy to evergreen over the shared cloudflared tunnel, SSHing as the
+#     unprivileged `deploy` user. authorized_keys pins this app's key to
+#     /srv/run-deploy-expense-ledger.sh, so the key can ONLY trigger that one
+#     script — never arbitrary commands on prod.
+# No self-hosted runner; CI never shares a host with production.
+#
+# The ezBookkeeping engine image is NOT built here — it is pinned by digest
+# in docker-compose.yml and mirrored to ghcr.io/thehfhotel/ezbookkeeping by
+# .github/workflows/mirror-engine.yml (manual dispatch only).
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+
+      # Gate the deploy on the same checks the CI workflow runs. Deploy only
+      # `needs` its own build job, NOT the separate CI workflow — so a red
+      # test suite alone would not stop a push to main from reaching
+      # production without this step.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3"
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ env.REGISTRY }}/thehfhotel/expense-ledger
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          # Cache to/from the registry — single image, no scoped GHA cache.
+          cache-from: type=registry,ref=ghcr.io/thehfhotel/expense-ledger:buildcache
+          cache-to: type=registry,ref=ghcr.io/thehfhotel/expense-ledger:buildcache,mode=max
+
+  deploy-evergreen:
+    name: Deploy to evergreen
+    runs-on: ubuntu-latest
+    needs: [build]
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-evergreen-expense-ledger
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5.0.0
+        with:
+          sparse-checkout: |
+            docker-compose.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /tmp/cloudflared
+          sudo install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Install SSH key + known_hosts
+        env:
+          SSH_KEY:  ${{ secrets.EVERGREEN_EXPENSE_LEDGER_DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.EVERGREEN_HOST_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY"  > ~/.ssh/deploy_key  && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy via SSH to evergreen
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          ENGINE_API_TOKEN: ${{ secrets.ENGINE_API_TOKEN }}
+          ACCESS_TEAM_DOMAIN: ${{ secrets.ACCESS_TEAM_DOMAIN }}
+          ACCESS_AUD: ${{ secrets.ACCESS_AUD }}
+          EBK_SECURITY_SECRET_KEY: ${{ secrets.EBK_SECURITY_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          # Runtime env shipped alongside compose; docker compose reads
+          # ./.env on `up`. Written unconditionally (unlike a purely
+          # optional feature's secrets) because the app-side Access check is
+          # defense-in-depth, not optional, and the engine cannot run
+          # meaningfully without its secret key.
+          {
+            printf 'IMAGE_TAG=%s\n' "$IMAGE_TAG"
+            printf 'HOST_PORT=%s\n' "4050"
+            printf 'ACCESS_TEAM_DOMAIN=%s\n' "${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}"
+            printf 'ACCESS_AUD=%s\n' "${ACCESS_AUD:-}"
+            # Bearer token the frontend uses to call the engine's HTTP API
+            # (src/server/engine.ts). Minted from the engine's own UI after
+            # first-boot account creation — see README "First-boot
+            # procedure". Empty keeps the engine client dormant.
+            printf 'ENGINE_API_TOKEN=%s\n' "${ENGINE_API_TOKEN:-}"
+            # Signs ezBookkeeping's tokens and encrypts stored secrets.
+            # Empty falls back to an insecure literal default — see README
+            # "Gotchas" — so this should always be set once the engine has
+            # real user data.
+            printf 'EBK_SECURITY_SECRET_KEY=%s\n' "${EBK_SECURITY_SECRET_KEY:-}"
+            # Registration stays OFF by default in production; flip to true
+            # by hand on the host only for the first-boot account-creation
+            # window, then back to false. Never leave it true unattended.
+            printf 'EBK_USER_ENABLE_REGISTER=%s\n' "false"
+          } > .env
+          tar -czf /tmp/deploy.tar.gz docker-compose.yml .env
+          rm -f .env
+
+          jq -n \
+            --arg commit_sha         "$GITHUB_SHA" \
+            --arg deploy_payload_b64 "$(base64 -w0 < /tmp/deploy.tar.gz)" \
+            --arg ghcr_user          "$GHCR_USER" \
+            --arg ghcr_token         "$GHCR_TOKEN" \
+            '{
+              commit_sha: $commit_sha,
+              deploy_payload_b64: $deploy_payload_b64,
+              ghcr: { user: $ghcr_user, token: $ghcr_token }
+            }' \
+          | ssh -i ~/.ssh/deploy_key \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -o ProxyCommand="cloudflared --edge-ip-version 4 access ssh --hostname %h" \
+              deploy@evergreen.thehfhotel.org

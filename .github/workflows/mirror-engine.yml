@@ -1,0 +1,52 @@
+name: Mirror engine image
+
+# Copies a tag of the upstream ezBookkeeping image (docker.io/mayswind/
+# ezbookkeeping) to our own GHCR mirror (ghcr.io/thehfhotel/ezbookkeeping),
+# byte-for-byte — `crane copy` preserves the manifest digest, so the mirrored
+# tag resolves to the exact same sha256 as upstream. docker-compose.yml pins
+# the engine service to that digest, never to a moving tag.
+#
+# github.com/thehfhotel/ezbookkeeping (a fork of mayswind/ezbookkeeping with
+# Dependabot alerts enabled) is source insurance only — this workflow never
+# builds from it. We consume upstream's published image and mirror it so our
+# own deploy never depends on Docker Hub's continued existence, not because
+# we don't trust upstream's build.
+#
+# Manual dispatch only — a new engine version is a deliberate upgrade (see
+# README "Upgrade procedure"), never an automatic push-triggered rebuild.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream mayswind/ezbookkeeping tag to mirror (as published on Docker Hub, e.g. 1.6.1 — no leading 'v')"
+        required: true
+        default: "1.6.1"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Log in to GHCR
+        run: crane auth login ghcr.io --username "${{ github.actor }}" --password "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Copy image (all platforms, digest-preserving)
+        run: |
+          set -euo pipefail
+          SRC="docker.io/mayswind/ezbookkeeping:${{ inputs.tag }}"
+          DST="ghcr.io/thehfhotel/ezbookkeeping:${{ inputs.tag }}"
+          echo "copying $SRC -> $DST"
+          crane copy "$SRC" "$DST"
+
+          DIGEST=$(crane digest "$DST")
+          echo "mirrored digest: $DIGEST"
+          echo "### Mirrored \`${{ inputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/thehfhotel/ezbookkeeping@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"

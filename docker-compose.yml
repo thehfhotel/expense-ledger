@@ -1,0 +1,88 @@
+services:
+  app:
+    image: ghcr.io/thehfhotel/expense-ledger:${IMAGE_TAG:-latest}
+    container_name: expense-ledger
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-4050}:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - TZ=${TZ:-Asia/Bangkok}
+      - ENGINE_URL=${ENGINE_URL:-http://expense-ledger-engine:8080}
+      - ENGINE_API_TOKEN=${ENGINE_API_TOKEN:-}
+      - ACCESS_TEAM_DOMAIN=${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}
+      - ACCESS_AUD=${ACCESS_AUD:-}
+    depends_on:
+      - engine
+    networks:
+      - default
+      - shared-nginx
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1.0'
+        reservations:
+          memory: 64M
+
+  engine:
+    # Pinned by digest to our own GHCR mirror of upstream v1.6.1 (see
+    # .github/workflows/mirror-engine.yml — `crane copy` preserves the
+    # digest, so this is byte-identical to docker.io/mayswind/ezbookkeeping
+    # at that tag). thehfhotel/ezbookkeeping (the source fork with
+    # Dependabot alerts) is insurance only — we consume the image, never
+    # build from the fork, unless upstream disappears. See README "Upgrade
+    # procedure" before bumping this digest.
+    image: ghcr.io/thehfhotel/ezbookkeeping@sha256:6d71a0d0f62806f609634886d0cbe9133e8177e1cb76b569d8dcc0587f734f0a
+    container_name: expense-ledger-engine
+    restart: unless-stopped
+    # Loopback ONLY — the engine must never be reachable off-host. The
+    # frontend reaches it as http://expense-ledger-engine:8080 over the
+    # compose `default` network; this host-port mapping exists solely for
+    # local operator access (curl/ssh tunnel), never for shared-nginx or
+    # Cloudflare.
+    ports:
+      - "127.0.0.1:4051:8080"
+    environment:
+      - TZ=${TZ:-Asia/Bangkok}
+      - EBK_SECURITY_SECRET_KEY=${EBK_SECURITY_SECRET_KEY:-}
+      - EBK_USER_ENABLE_REGISTER=${EBK_USER_ENABLE_REGISTER:-false}
+      # Redirects the engine's local-filesystem picture/avatar storage
+      # (default: a directory relative to /ezbookkeeping, NOT under
+      # /ezbookkeeping/data) into the one mounted volume below, so receipt
+      # photos survive a container recreation instead of silently living on
+      # ephemeral container storage. See README "Gotchas".
+      - EBK_STORAGE_LOCAL_FILESYSTEM_PATH=/ezbookkeeping/data/storage
+    volumes:
+      - expense_data:/ezbookkeeping/data
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz.json >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+        reservations:
+          memory: 32M
+
+volumes:
+  expense_data:
+    name: expense_data
+
+networks:
+  shared-nginx:
+    external: true
+    name: shared-nginx
