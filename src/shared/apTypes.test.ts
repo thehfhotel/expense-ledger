@@ -9,6 +9,7 @@ import {
   derivePaymentKind,
   paymentKindSuffix,
   paymentNeedsCategoryPicker,
+  resolveCreditorHintCategoryCode,
   statusRank,
   type ApPayment,
 } from "./apTypes.ts";
@@ -173,6 +174,24 @@ describe("paymentNeedsCategoryPicker (RULING 1 — payments still require a cate
 
   test("false once the row already carries a category", () => {
     expect(paymentNeedsCategoryPicker("commission-booking")).toBe(false);
+  });
+});
+
+describe("resolveCreditorHintCategoryCode (M3 fix — creditor-hint prefill never overwrites a chosen category)", () => {
+  test("applies the hint when there is no current selection and the hint is non-null", () => {
+    expect(resolveCreditorHintCategoryCode(null, "commission-booking")).toBe("commission-booking");
+  });
+
+  test("leaves a null current selection null when the hint is also null", () => {
+    expect(resolveCreditorHintCategoryCode(null, null)).toBeNull();
+  });
+
+  test("never overwrites an already-chosen category with a DIFFERENT hint", () => {
+    expect(resolveCreditorHintCategoryCode("housekeeping", "commission-booking")).toBe("housekeeping");
+  });
+
+  test("never blanks an already-chosen category just because the hint is null", () => {
+    expect(resolveCreditorHintCategoryCode("housekeeping", null)).toBe("housekeeping");
   });
 });
 

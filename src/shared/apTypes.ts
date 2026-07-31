@@ -135,6 +135,12 @@ export interface CreateApRowResponse {
 export interface CreateApPaymentResponse {
   paymentId: string;
   transactionId: string;
+  /** L1 fix: the categoryCode the payment ACTUALLY posted under (the row's
+   * pre-existing category, or the one this request just supplied and had
+   * persisted) — the client uses this directly for its confirmation text
+   * instead of re-deriving it, which used to risk showing a different value
+   * than what the server actually recorded. */
+  categoryCode: ExpenseCategoryCode;
 }
 
 // ── Arithmetic ──────────────────────────────────────────────────────────
@@ -235,9 +241,35 @@ export function derivePaymentKind(existingPayments: readonly ApPayment[], settle
  * payment route (which decides whether to require/persist one) apply the
  * EXACT same rule, never two independently-drifting copies. A row that
  * already carries a category keeps the pre-ruling behavior — no picker, no
- * server-side requirement. */
-export function paymentNeedsCategoryPicker(rowCategoryCode: ExpenseCategoryCode | null): boolean {
+ * server-side requirement.
+ *
+ * M2 fix: this is the ONE place the payment-category-REQUIREMENT rule lives
+ * — src/client/pages/ApPage.tsx's `categoryChipLabel` also branches on
+ * `row.categoryCode` being null, but that is a DIFFERENT concern (what label
+ * the register's chip displays), not whether a payment must collect one; it
+ * deliberately does not call this helper, and should not start to.
+ *
+ * A `rowCategoryCode is null` type predicate (rather than a plain boolean)
+ * so src/server/server.ts's payment route — which used to inline
+ * `row.categoryCode === null` partly FOR the resulting `else` branch's
+ * narrowing to a non-null ExpenseCategoryCode — keeps that same narrowing
+ * after switching to call this helper instead. */
+export function paymentNeedsCategoryPicker(rowCategoryCode: ExpenseCategoryCode | null): rowCategoryCode is null {
   return rowCategoryCode === null;
+}
+
+/** M3 fix: ApRowDrawer's creditor-hint prefill (spec §4 item 1, ADD mode
+ * only) must never overwrite a category the clerk has already chosen, and
+ * must never blank an already-chosen category just because the matched
+ * creditor's most recent row happened to have none — the hint only applies
+ * when there is NO current selection AND the hint itself is non-null.
+ * Pulled out as a pure function so this rule is unit-testable without a
+ * DOM/React harness (this repo has none for client components yet). */
+export function resolveCreditorHintCategoryCode(
+  current: ExpenseCategoryCode | null,
+  hint: ExpenseCategoryCode | null,
+): ExpenseCategoryCode | null {
+  return current === null && hint !== null ? hint : current;
 }
 
 /** `ap:<rowId>` — the ezBookkeeping tag every posted payment for this row

@@ -6,12 +6,14 @@
 // module directly — see that file's "AP store lazy-open" describe block.
 
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ApRowHasPaymentsError,
+  _getDbForTests,
+  _migrateCategoryCodeNullableForTests,
   _resetForTests,
   addApPayment,
   computeApSummary,
@@ -423,5 +425,70 @@ describe("RULING 1 (2026-07): nullable categoryCode", () => {
     expect(getApRow(newId)!.categoryCode).toBeNull();
     // The pre-existing row survived the table rebuild untouched.
     expect(getApRow("pre-existing-1")!.creditor).toBe("Booking.com");
+  });
+});
+
+describe("M1 fix: busy_timeout", () => {
+  test("openDb sets a 5s busy_timeout, so a second process racing this one's writes waits instead of failing immediately", () => {
+    createApRow(baseRowInput(), "clerk@thehfhotel.org"); // forces the lazy open
+    const pragma = _getDbForTests().query("PRAGMA busy_timeout").get() as { timeout: number };
+    expect(pragma.timeout).toBe(5000);
+  });
+});
+
+describe("L3 fix: a throwing migration restores the pragma and doesn't leak the handle", () => {
+  /** Builds the pre-ruling schema (category_code NOT NULL) so the migration
+   * runs on next touch, then pre-creates the migration's OWN scratch table
+   * under an incompatible shape so its `CREATE TABLE
+   * ap_row__migrating_nullable_category` step throws partway through the
+   * transaction — simulating ANY mid-migration failure without needing an
+   * injection seam into the migration's SQL itself. */
+  function seedPreRulingSchemaWithScratchTableCollision(): void {
+    const seedDb = new Database(process.env.AP_DB_PATH!, { create: true });
+    seedDb.exec(`
+      CREATE TABLE ap_row (
+        id TEXT PRIMARY KEY,
+        creditor TEXT NOT NULL,
+        item TEXT NOT NULL,
+        amount_satang INTEGER NOT NULL,
+        vat_satang INTEGER,
+        wht_satang INTEGER,
+        discount_satang INTEGER NOT NULL DEFAULT 0,
+        due_date TEXT,
+        entity TEXT NOT NULL DEFAULT '',
+        category_code TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        filed_date TEXT NOT NULL
+      );
+    `);
+    seedDb.exec("CREATE TABLE ap_row__migrating_nullable_category (bogus INTEGER);");
+    seedDb.close();
+  }
+
+  test("migrateCategoryCodeNullable's try/finally restores PRAGMA foreign_keys = ON even when the migration throws", () => {
+    _resetForTests();
+    seedPreRulingSchemaWithScratchTableCollision();
+
+    const db = new Database(process.env.AP_DB_PATH!);
+    expect(() => _migrateCategoryCodeNullableForTests(db)).toThrow();
+
+    const fk = db.query("PRAGMA foreign_keys").get() as { foreign_keys: number };
+    expect(fk.foreign_keys).toBe(1);
+    db.close();
+  });
+
+  test("openDb closes the handle rather than leaking it when the migration fails", () => {
+    _resetForTests();
+    seedPreRulingSchemaWithScratchTableCollision();
+
+    const closeSpy = spyOn(Database.prototype, "close");
+    try {
+      expect(() => getApRow("anything")).toThrow();
+      expect(closeSpy).toHaveBeenCalled();
+    } finally {
+      closeSpy.mockRestore();
+    }
   });
 });

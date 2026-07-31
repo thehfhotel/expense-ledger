@@ -715,6 +715,70 @@ describe("AP register: row validation and CRUD (no engine involved)", () => {
     expect(res.status).toBe(404);
   });
 
+  describe("H1a fix (probe-proven): categoryCode is locked once a row has >= 1 payment", () => {
+    function addPayment(rowId: string): void {
+      apStore.addApPayment(rowId, {
+        date: todayBangkok(),
+        amountSatang: 1_000,
+        paymentMethod: "cash",
+        kind: "deposit",
+        installmentNumber: null,
+        payerEmail: "tester@thehfhotel.org",
+        transactionId: "1",
+      });
+    }
+
+    function patchCategory(id: string, overrides: Record<string, unknown>) {
+      return devRequest(`/api/ap/rows/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(baseApRowBody({ categoryCode: "commission-booking", ...overrides })),
+      });
+    }
+
+    test("409s changing categoryCode to a DIFFERENT value on a row with a payment, and leaves it untouched", async () => {
+      const createRes = await fetchHandler(post(baseApRowBody({ categoryCode: "commission-booking" })));
+      const { id } = (await createRes.json()) as { id: string };
+      addPayment(id);
+
+      const patchRes = await fetchHandler(patchCategory(id, { categoryCode: "housekeeping" }));
+      expect(patchRes.status).toBe(409);
+      expect(await patchRes.json()).toEqual({ error: "category_locked_by_payments" });
+      expect(apStore.getApRow(id)!.categoryCode).toBe("commission-booking");
+    });
+
+    test("409s NULL-ing categoryCode on a row with a payment — the exact probe-proven bill-splitting bug", async () => {
+      const createRes = await fetchHandler(post(baseApRowBody({ categoryCode: "commission-booking" })));
+      const { id } = (await createRes.json()) as { id: string };
+      addPayment(id);
+
+      const patchRes = await fetchHandler(patchCategory(id, { categoryCode: null }));
+      expect(patchRes.status).toBe(409);
+      expect(await patchRes.json()).toEqual({ error: "category_locked_by_payments" });
+      expect(apStore.getApRow(id)!.categoryCode).toBe("commission-booking");
+    });
+
+    test("a SAME-value PATCH still passes on a row with a payment (only an actual change is rejected)", async () => {
+      const createRes = await fetchHandler(post(baseApRowBody({ categoryCode: "commission-booking" })));
+      const { id } = (await createRes.json()) as { id: string };
+      addPayment(id);
+
+      const patchRes = await fetchHandler(patchCategory(id, { categoryCode: "commission-booking", note: "แก้ไขแล้ว" }));
+      expect(patchRes.status).toBe(200);
+      expect(apStore.getApRow(id)!.categoryCode).toBe("commission-booking");
+      expect(apStore.getApRow(id)!.note).toBe("แก้ไขแล้ว");
+    });
+
+    test("a categoryCode CHANGE on a ZERO-payment row still passes — the lock only applies once paid", async () => {
+      const createRes = await fetchHandler(post(baseApRowBody({ categoryCode: "commission-booking" })));
+      const { id } = (await createRes.json()) as { id: string };
+
+      const patchRes = await fetchHandler(patchCategory(id, { categoryCode: "housekeeping" }));
+      expect(patchRes.status).toBe(200);
+      expect(apStore.getApRow(id)!.categoryCode).toBe("housekeeping");
+    });
+  });
+
   describe("delete rules — zero-payment rows only (spec §6)", () => {
     test("deletes a row with zero payments", async () => {
       const createRes = await fetchHandler(post(baseApRowBody()));
@@ -848,9 +912,11 @@ describe("AP register: payment posting (mocked engine HTTP)", () => {
       postPayment(rowId, { date: todayBangkok(), amountSatang: 4_000, paymentMethod: "cash" }),
     );
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { paymentId: string; transactionId: string };
+    const body = (await res.json()) as { paymentId: string; transactionId: string; categoryCode: string };
     expect(body.paymentId).toBeTruthy();
     expect(body.transactionId).toBeTruthy();
+    // L1 fix: the response carries the categoryCode actually posted under.
+    expect(body.categoryCode).toBe("commission-booking");
 
     const row = apStore.getApRow(rowId)!;
     expect(row.outstandingSatang).toBe(6_000);
@@ -1044,6 +1110,10 @@ describe("AP register: payment posting (mocked engine HTTP)", () => {
         }),
       );
       expect(res.status).toBe(201);
+      // L1 fix: the response echoes back the categoryCode this payment
+      // ACTUALLY posted/persisted under.
+      const body = (await res.json()) as { categoryCode: string };
+      expect(body.categoryCode).toBe("commission-booking");
 
       const row = apStore.getApRow(rowId)!;
       expect(row.categoryCode).toBe("commission-booking");
@@ -1065,6 +1135,12 @@ describe("AP register: payment posting (mocked engine HTTP)", () => {
         }),
       );
       expect(res.status).toBe(201);
+      // L1 fix: the response's categoryCode is the row's OWN pre-existing
+      // one — never the ignored client-sent value — proving the client
+      // can trust this field for its confirmation text instead of
+      // re-deriving from the (possibly wrong) locally-picked value.
+      const body = (await res.json()) as { categoryCode: string };
+      expect(body.categoryCode).toBe("commission-booking");
       const row = apStore.getApRow(rowId)!;
       expect(row.categoryCode).toBe("commission-booking");
     });

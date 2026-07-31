@@ -22,6 +22,7 @@ import {
   computeOutstanding,
   derivePaymentKind,
   paymentKindSuffix,
+  paymentNeedsCategoryPicker,
   type ApListFilter,
   type ApPaymentInput,
   type ApRowInput,
@@ -660,6 +661,21 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
           // interleave between this read and the write below.
           const existing = apStore.getApRow(id);
           if (!existing) return json(404, { error: "not found" });
+          // H1a fix (probe-proven): once a row has >= 1 payment, its
+          // categoryCode is LOCKED — a stale drawer (opened before an
+          // inline payment persisted a category, never re-synced) could
+          // otherwise PATCH categoryCode back to null or to a different
+          // value after the fact, letting a later installment post under a
+          // DIFFERENT ledger category than an earlier one for the SAME
+          // bill. Same-VALUE PATCHes (the common case: the rest of the form
+          // saved unchanged) still pass — only an actual change is
+          // rejected. Checked inside the same withApWriteLock-guarded
+          // re-read as the negative-outstanding check below, so a
+          // concurrent payment can never land between this read and the
+          // reject.
+          if (existing.payments.length > 0 && validated.value.categoryCode !== existing.categoryCode) {
+            return json(409, { error: "category_locked_by_payments" });
+          }
           const gross = computeGross(validated.value.amountSatang, validated.value.vatSatang, validated.value.whtSatang);
           if (computeOutstanding(gross, existing.payments, validated.value.discountSatang) < 0) {
             return json(400, { error: "negative outstanding" });
@@ -723,7 +739,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         // ruling.
         let categoryCodeForPosting: ExpenseCategoryCode;
         let categoryCodeToPersist: ExpenseCategoryCode | null = null;
-        if (row.categoryCode === null) {
+        // M2 fix: paymentNeedsCategoryPicker is the single source for this
+        // requirement rule — was `row.categoryCode === null` inlined here,
+        // a second copy of exactly what that helper already expresses.
+        if (paymentNeedsCategoryPicker(row.categoryCode)) {
           if (!validated.value.categoryCode) {
             return json(400, { error: "category required for payment" });
           }
@@ -771,7 +790,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             },
             categoryCodeToPersist,
           );
-          return json(201, { paymentId, transactionId });
+          // L1 fix: echo back the categoryCode this payment ACTUALLY posted
+          // under — the client uses this directly for its confirmation
+          // text instead of re-deriving it from possibly-stale local state.
+          return json(201, { paymentId, transactionId, categoryCode: categoryCodeForPosting });
         } catch (err) {
           // H4a fix: the ledger transaction posted but the local payment row
           // didn't — spec §5 "Ordering": never leave a ledger entry the

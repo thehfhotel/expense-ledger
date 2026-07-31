@@ -238,6 +238,15 @@ export const AP_VALIDATION = {
    * real category, matching the server's distinct "category required for
    * payment" 400. */
   categoryRequiredForPayment: "เลือกหมวดค่าใช้จ่ายก่อนบันทึกการชำระ",
+  /** H1a fix: shown in the edit drawer when a save would change (including
+   * null-ing) categoryCode on a row that already has >= 1 payment — matches
+   * the server's distinct "category_locked_by_payments" 409. */
+  categoryLockedByPayments: "หมวดถูกล็อกแล้วเนื่องจากมีการชำระ จัดการหมวดได้เฉพาะก่อนการชำระครั้งแรก",
+  /** L2 fix: shown in the payment form for the server's "invalid
+   * categoryCode" 400 — distinct from the generic engine-error fallback, so
+   * a malformed category value reads as a validation problem, not the
+   * ledger engine being unreachable. */
+  invalidCategoryForPayment: "หมวดค่าใช้จ่ายไม่ถูกต้อง ลองเลือกใหม่อีกครั้ง",
 };
 
 export const AP_ENTITIES = ["บจก.สายชล เฮอริเทจ", "HF Ville", "HF", "SCM", "บจก.สายชล เฮอริเทจ ทหารไทย"];

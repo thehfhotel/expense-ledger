@@ -99,14 +99,18 @@ export function ApPaymentForm({ row, onClose, onPosted }: Props) {
     setError(null);
     setSubmitting(true);
     try {
-      await createApPayment(row.id, {
+      const posted = await createApPayment(row.id, {
         date,
         amountSatang,
         paymentMethod,
         ...(needsCategoryPicker ? { categoryCode: pickedCategoryCode! } : {}),
       });
       savePaymentMethod(paymentMethod);
-      onPosted(date, row.categoryCode ?? pickedCategoryCode!);
+      // L1 fix: use the categoryCode the server says ACTUALLY posted,
+      // rather than re-deriving it from local state (row.categoryCode ??
+      // pickedCategoryCode) — the response is the one value that can never
+      // disagree with what was really recorded.
+      onPosted(date, posted.categoryCode);
     } catch (err) {
       if (err instanceof SessionExpiredError) return;
       if (err instanceof EngineUnreachableError) {
@@ -117,6 +121,11 @@ export function ApPaymentForm({ row, onClose, onPosted }: Props) {
         setError(AP_VALIDATION.payTooMuch);
       } else if (err instanceof Error && err.message === "category required for payment") {
         setError(AP_VALIDATION.categoryRequiredForPayment);
+      } else if (err instanceof Error && err.message === "invalid categoryCode") {
+        // L2 fix: a distinct Thai validation message, not the generic
+        // engine-error fallback — this is a bad value, not the ledger
+        // engine failing to respond.
+        setError(AP_VALIDATION.invalidCategoryForPayment);
       } else {
         setError(ENGINE_ERROR.message);
       }

@@ -6,6 +6,7 @@ import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
 import {
   computeGross,
   computeOutstanding,
+  resolveCreditorHintCategoryCode,
   type ApCreditorHint,
   type ApPayment,
   type ApRow,
@@ -119,6 +120,23 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  // H1b fix (probe-proven): categoryCode's local state above is seeded from
+  // `row` only ONCE, on mount — a payment posted from WITHIN this drawer
+  // (or, in principle, from anywhere else while it's open) can persist a
+  // category server-side onto a previously null-category row, and
+  // onPaymentChanged's refetch flows the updated value back in as a new
+  // `row` prop, but without this resync the pill kept showing ไม่ระบุหมวด
+  // and a subsequent บันทึก would then PATCH categoryCode back to null —
+  // exactly what H1a's server-side lock now separately rejects, but the
+  // client should never even offer a stale value in the first place. Keyed
+  // on the PERSISTED categoryCode only (a primitive, not the `row` object
+  // reference), so this never fires just because some other field (e.g.
+  // outstanding after the same payment) changed, and never clobbers an
+  // in-progress LOCAL edit the clerk hasn't saved yet.
+  useEffect(() => {
+    setCategoryCode(row?.categoryCode ?? null);
+  }, [row?.categoryCode]);
+
   function handleCreditorChange(value: string) {
     setCreditor(value);
     // Prefill หมวดค่าใช้จ่าย/ในนาม from the creditor's most recent row (spec
@@ -127,7 +145,11 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     if (row === null) {
       const hint = creditors.find((c) => c.creditor === value);
       if (hint) {
-        setCategoryCode(hint.categoryCode);
+        // M3 fix: never overwrite an already-chosen category, and never
+        // blank one with a null hint — see resolveCreditorHintCategoryCode.
+        // Functional update so this reads the LATEST categoryCode rather
+        // than one possibly-stale closure value.
+        setCategoryCode((current) => resolveCreditorHintCategoryCode(current, hint.categoryCode));
         setEntity(hint.entity);
       }
     }
@@ -209,6 +231,10 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
       if (err instanceof SessionExpiredError) return;
       if (err instanceof Error && err.message === "negative outstanding") {
         setErrors({ outstanding: AP_VALIDATION.negativeOutstanding });
+      } else if (err instanceof Error && err.message === "category_locked_by_payments") {
+        // H1a fix: the server rejected a categoryCode change (or null-ing)
+        // on a row that already has >= 1 payment.
+        setSaveError(AP_VALIDATION.categoryLockedByPayments);
       } else if (err instanceof EngineUnreachableError) {
         setSaveError(ENGINE_ERROR.message);
       } else {
