@@ -193,6 +193,14 @@ export function createEngineClient({ baseUrl, token }: EngineClientOptions) {
         `/transactions/list/by_month.json?year=${year}&month=${month}&type=${TRANSACTION_TYPE_EXPENSE}`,
       ),
 
+    /** GET /transactions/get.json?id= - same endpoint src/server/engine.ts's
+     * getEngineTransaction wraps for the frontend (see README "ezBookkeeping
+     * API notes"). Used by scripts/reconcile-ap.ts to check whether a
+     * specific transaction id still exists; `request` throws
+     * EngineRequestError when the engine reports success:false (not found),
+     * which reconcile-ap.ts's caller catches to mean exactly that. */
+    getTransaction: (id: string) => request<EngineTransaction>(`/transactions/get.json?id=${encodeURIComponent(id)}`),
+
     deleteTransaction: (id: string) => request<boolean>(`/transactions/delete.json`, { method: "POST", body: JSON.stringify({ id }) }),
   };
 }

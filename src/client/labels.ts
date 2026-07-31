@@ -124,6 +124,23 @@ export const ENGINE_ERROR = {
   retry: "ลองอีกครั้ง",
 };
 
+/** L1 fix: distinct from ENGINE_ERROR — a LOCAL store failure (the AP
+ * register's own sqlite, or any other server-side store) is not "the ledger
+ * engine didn't answer," so it gets its own Thai wording rather than either
+ * a raw English error token or the engine-unreachable message. */
+export const AP_STORE_ERROR = {
+  message: "โหลดข้อมูลไม่สำเร็จ — ระบบค้างจ่ายมีปัญหา",
+  detail: "ระบบค้างจ่ายมีปัญหา",
+};
+
+/** H2 fix: shown when a clerk tries to edit/delete an ordinary expense entry
+ * that the AP register actually manages (carries an `ap:` tag) — the server
+ * 409s `{ "error": "ap_managed" }`; this is the Thai text pointing the clerk
+ * at the right place instead of a generic failure. */
+export const AP_MANAGED = {
+  message: "รายการนี้เป็นรายการค้างจ่าย — แก้ไขหรือลบได้จากแท็บ ค้างจ่าย เท่านั้น",
+};
+
 export const SESSION_ERROR = {
   title: "หมดเวลาเข้าใช้งาน",
   body: "กรุณาเข้าสู่ระบบใหม่",

@@ -16,6 +16,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ExpenseCategoryCode } from "../shared/categories.ts";
+import { todayBangkok } from "../shared/date.ts";
 import {
   computeGross,
   computeOutstanding,
@@ -57,7 +58,18 @@ function openDb(path: string): Database {
       category_code TEXT NOT NULL,
       note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
-      created_by TEXT NOT NULL
+      created_by TEXT NOT NULL,
+      -- M1 fix: the Bangkok CALENDAR date (todayBangkok(), "YYYY-MM-DD") this
+      -- row was filed on — used ONLY for the month-fallback filter
+      -- (listApRows below) and as deriveSettledAt's zero-payment fallback
+      -- (H3 fix). created_at above stays a full UTC ISO timestamp (useful
+      -- for same-day insertion-order tiebreaks); slicing THAT for month
+      -- filing is exactly the bug (a row created 00:00-07:00 Bangkok on the
+      -- 1st has a created_at whose UTC calendar date is still the LAST day
+      -- of the previous month, so createdAt.slice(0,7) named the wrong
+      -- month). The register held zero rows when this was added, so this is
+      -- a schema definition, not a migration.
+      filed_date TEXT NOT NULL
     );
   `);
   db.exec(`
@@ -116,6 +128,7 @@ interface RawRow {
   note: string;
   created_at: string;
   created_by: string;
+  filed_date: string;
 }
 
 interface RawPayment {
@@ -169,7 +182,10 @@ function mapRow(db: Database, raw: RawRow): ApRow {
     note: raw.note,
     createdAt: raw.created_at,
     createdBy: raw.created_by,
-    settledAt: deriveSettledAt(payments, outstanding),
+    // H3 fix: pass filed_date so a row settled with ZERO payments (a
+    // discount/WHT alone brought outstanding to <= 0) gets a real settledAt
+    // instead of null — see deriveSettledAt's doc comment.
+    settledAt: deriveSettledAt(payments, outstanding, raw.filed_date),
     grossSatang: gross,
     outstandingSatang: outstanding,
     payments,
@@ -181,11 +197,15 @@ function mapRow(db: Database, raw: RawRow): ApRow {
 export function createApRow(input: ApRowInput, createdBy: string): string {
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
+  // M1 fix: filed_date is the Bangkok CALENDAR date, computed independently
+  // of createdAt's UTC timestamp — see the CREATE TABLE comment above for
+  // why these two must not be derived from each other.
+  const filedDate = todayBangkok();
   getDb()
     .query(
       `INSERT INTO ap_row
-        (id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by, filed_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -201,6 +221,7 @@ export function createApRow(input: ApRowInput, createdBy: string): string {
       input.note,
       createdAt,
       createdBy,
+      filedDate,
     );
   return id;
 }
@@ -248,13 +269,17 @@ export function deleteApRow(id: string): void {
 export function listApRows(filter: ApListFilter): ApRow[] {
   const db = getDb();
   const raw = db.query("SELECT * FROM ap_row").all() as RawRow[];
-  const rows = raw.map((r) => mapRow(db, r));
-  if (filter.mode === "all") return rows;
-  if (filter.mode === "open") return rows.filter((r) => r.outstandingSatang > 0);
-  // month: กำหนดชำระ's month, falling back to the created month when the due
+  if (filter.mode === "all") return raw.map((r) => mapRow(db, r));
+  if (filter.mode === "open") return raw.map((r) => mapRow(db, r)).filter((r) => r.outstandingSatang > 0);
+  // month: กำหนดชำระ's month, falling back to the FILING month when the due
   // date is blank (spec §2 "Month filter matches กำหนดชำระ's month...").
+  // M1 fix: filters on the raw `filed_date` (Bangkok calendar date) BEFORE
+  // mapping to ApRow, never on `created_at` (a full UTC timestamp) — a row
+  // created 00:00-07:00 Bangkok on the 1st used to slice into the PREVIOUS
+  // month, because UTC's calendar date at that moment is still the last day
+  // of the prior month.
   const month = filter.month!;
-  return rows.filter((r) => (r.dueDate ?? r.createdAt).slice(0, 7) === month);
+  return raw.filter((r) => (r.due_date ?? r.filed_date).slice(0, 7) === month).map((r) => mapRow(db, r));
 }
 
 /** Always over every currently-unsettled row regardless of the active

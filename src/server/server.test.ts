@@ -5,7 +5,7 @@
 // dev-mode bypass without a real Cloudflare Access JWT.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as apStore from "./apStore.ts";
@@ -190,6 +190,42 @@ describe("POST /api/expenses validation", () => {
   });
 });
 
+describe("M5 fix: /api write routes reject a non-JSON content-type with 415", () => {
+  afterEach(resetAuthEnv);
+
+  test("POST /api/expenses 415s a text/plain body before ever parsing it", async () => {
+    const res = await fetchHandler(
+      devRequest("/api/expenses", {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify({ date: todayBangkok(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
+      }),
+    );
+    expect(res.status).toBe(415);
+  });
+
+  test("POST /api/expenses 415s a request with no content-type header at all", async () => {
+    const res = await fetchHandler(
+      devRequest("/api/expenses", {
+        method: "POST",
+        body: JSON.stringify({ date: todayBangkok(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
+      }),
+    );
+    expect(res.status).toBe(415);
+  });
+
+  test("PATCH /api/expenses/:id 415s a non-JSON content-type", async () => {
+    const res = await fetchHandler(
+      devRequest("/api/expenses/123", {
+        method: "PATCH",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify({ date: todayBangkok(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
+      }),
+    );
+    expect(res.status).toBe(415);
+  });
+});
+
 describe("current-month lock on create (H4 fix — create had no month check at all)", () => {
   afterEach(resetAuthEnv);
 
@@ -241,6 +277,76 @@ describe("current-month lock on edit/delete/photo routes", () => {
 
   test("POST /api/expenses/:id/photo surfaces 502 when the engine is dormant, before parsing multipart", async () => {
     const res = await fetchHandler(devRequest("/api/expenses/123/photo", { method: "POST" }));
+    expect(res.status).toBe(502);
+  });
+});
+
+describe("H2 fix: ordinary /api/expenses routes refuse a transaction the AP register manages", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    resetAuthEnv();
+  });
+
+  /** Mocks the engine as configured and reporting that transaction "123"
+   * carries tag id "42", which the tag list resolves to an "ap:row-abc"
+   * name — exactly the shape isApManagedTransaction (src/server/engine.ts)
+   * checks for. */
+  function mockApTaggedTransaction() {
+    process.env.ENGINE_API_TOKEN = "test-token";
+    global.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/transactions/get.json")) {
+        return new Response(
+          JSON.stringify({ success: true, result: { id: "123", time: Math.floor(Date.now() / 1000), tagIds: ["42"] } }),
+        );
+      }
+      if (href.includes("/transaction/tags/list.json")) {
+        return new Response(JSON.stringify({ success: true, result: [{ id: "42", name: "ap:row-abc" }] }));
+      }
+      throw new Error(`unexpected engine call in test: ${href}`);
+    }) as typeof fetch;
+  }
+
+  test("PATCH /api/expenses/:id 409s ap_managed instead of reaching modifyExpenseTransaction", async () => {
+    mockApTaggedTransaction();
+    const res = await fetchHandler(
+      devRequest("/api/expenses/123", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ date: todayBangkok(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
+      }),
+    );
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "ap_managed" });
+  });
+
+  test("DELETE /api/expenses/:id 409s ap_managed instead of reaching deleteExpenseTransaction", async () => {
+    mockApTaggedTransaction();
+    const res = await fetchHandler(devRequest("/api/expenses/123", { method: "DELETE" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "ap_managed" });
+  });
+
+  test("an UNTAGGED transaction is unaffected — still reaches the ordinary current-month lock", async () => {
+    process.env.ENGINE_API_TOKEN = "test-token";
+    global.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/transactions/get.json")) {
+        return new Response(JSON.stringify({ success: true, result: { id: "123", time: Math.floor(Date.now() / 1000), tagIds: [] } }));
+      }
+      throw new Error(`unexpected engine call in test: ${href}`);
+    }) as typeof fetch;
+
+    const res = await fetchHandler(devRequest("/api/expenses/123", { method: "DELETE" }));
+    // No ap: tag -> isApManagedTransaction is false -> falls through past it:
+    // the current-month lock passes (mocked `time` is "now"), then the route
+    // reaches deleteExpenseTransaction, whose /transactions/delete.json call
+    // isn't mocked here and throws — surfacing as 502, never 409. This
+    // proves the ap_managed check does NOT fire for an untagged transaction,
+    // rather than merely happening to short-circuit earlier for some other
+    // reason.
     expect(res.status).toBe(502);
   });
 });
@@ -467,6 +573,57 @@ describe("AP register: row validation and CRUD (no engine involved)", () => {
   test("400s when a discount would push ยอดค้างชำระ negative on create", async () => {
     const res = await fetchHandler(post(baseApRowBody({ amountSatang: 1_000, discountSatang: 5_000 })));
     expect(res.status).toBe(400);
+  });
+
+  test("L6 fix: 400s a due date with an out-of-sane-range year (the workbook really has a 1969 typo)", async () => {
+    const res = await fetchHandler(post(baseApRowBody({ dueDate: "1969-06-15" })));
+    expect(res.status).toBe(400);
+  });
+
+  test("L6 fix: 400s a due date past year 2100 too", async () => {
+    const res = await fetchHandler(post(baseApRowBody({ dueDate: "2101-01-01" })));
+    expect(res.status).toBe(400);
+  });
+
+  test("L6 fix: the boundary years 2000 and 2100 are both accepted", async () => {
+    const res2000 = await fetchHandler(post(baseApRowBody({ dueDate: "2000-01-01" })));
+    expect(res2000.status).toBe(201);
+    const res2100 = await fetchHandler(post(baseApRowBody({ creditor: "Other Co", dueDate: "2100-12-31" })));
+    expect(res2100.status).toBe(201);
+  });
+
+  test("H3 fix: a discount equal to the gross settles the row at creation with a non-null settledAt (credit-note case, zero payments)", async () => {
+    const createRes = await fetchHandler(post(baseApRowBody({ amountSatang: 5_000, discountSatang: 5_000 })));
+    expect(createRes.status).toBe(201);
+    const { id } = (await createRes.json()) as { id: string };
+
+    const listRes = await fetchHandler(devRequest("/api/ap/rows?f=all"));
+    const body = (await listRes.json()) as { rows: { id: string; outstandingSatang: number; settledAt: string | null }[] };
+    const row = body.rows.find((r) => r.id === id)!;
+    expect(row.outstandingSatang).toBe(0);
+    expect(row.settledAt).not.toBeNull();
+  });
+
+  test("M5 fix: POST /api/ap/rows 415s a non-JSON content-type", async () => {
+    const res = await fetchHandler(
+      devRequest("/api/ap/rows", {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify(baseApRowBody()),
+      }),
+    );
+    expect(res.status).toBe(415);
+  });
+
+  test("M5 fix: PATCH /api/ap/rows/:id 415s a non-JSON content-type", async () => {
+    const res = await fetchHandler(
+      devRequest("/api/ap/rows/does-not-matter", {
+        method: "PATCH",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify(baseApRowBody()),
+      }),
+    );
+    expect(res.status).toBe(415);
   });
 
   test("a valid row creates, then round-trips through GET /api/ap/rows", async () => {
@@ -702,6 +859,121 @@ describe("AP register: payment posting (mocked engine HTTP)", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  test("M5 fix: 415s a non-JSON content-type before touching the engine or the row", async () => {
+    const rowId = createRow();
+    const res = await fetchHandler(
+      devRequest(`/api/ap/rows/${rowId}/payments`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify({ date: todayBangkok(), amountSatang: 1_000, paymentMethod: "cash" }),
+      }),
+    );
+    expect(res.status).toBe(415);
+    expect(calls.length).toBe(0);
+  });
+
+  test("H1 fix: two overlapping payment requests against the same row — exactly one succeeds, outstanding never goes negative", async () => {
+    const rowId = createRow({ amountSatang: 10_000 });
+    const [resA, resB] = await Promise.all([
+      fetchHandler(postPayment(rowId, { date: todayBangkok(), amountSatang: 6_000, paymentMethod: "cash" })),
+      fetchHandler(postPayment(rowId, { date: todayBangkok(), amountSatang: 6_000, paymentMethod: "bank" })),
+    ]);
+    const statuses = [resA.status, resB.status].sort((a, b) => a - b);
+    // Exactly one succeeds (201), the other is correctly rejected (400,
+    // "amount exceeds outstanding") once it re-reads the balance the first
+    // one already spent — never both succeeding (which would double-book
+    // the engine) and never both failing.
+    expect(statuses).toEqual([201, 400]);
+
+    const row = apStore.getApRow(rowId)!;
+    expect(row.payments.length).toBe(1);
+    expect(row.outstandingSatang).toBe(4_000);
+    expect(row.outstandingSatang).toBeGreaterThanOrEqual(0);
+
+    const addCalls = calls.filter((c) => c.url.includes("/transactions/add.json"));
+    expect(addCalls.length).toBe(1);
+  });
+
+  test("H4a fix: a local insert failure AFTER the engine already posted returns 500 ap_store_error (not 502), and compensates by deleting the ledger transaction", async () => {
+    const rowId = createRow();
+    // A path whose "directory" component is actually a plain FILE is a
+    // reliable, permission-independent way to make bun:sqlite's Database
+    // constructor throw (apStore.ts's openDb() only mkdir's a MISSING
+    // directory; it never touches one that already exists as a file) —
+    // unlike pointing at a root-owned path, this doesn't depend on which
+    // user runs the test suite.
+    const brokenDir = join(tmpDir, "not-a-directory");
+    writeFileSync(brokenDir, "");
+    const originalDbPath = process.env.AP_DB_PATH!;
+    let deleteCalled = false;
+
+    global.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const href = String(url);
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      if (href.includes("/transaction/categories/list.json")) return new Response(JSON.stringify(CATEGORIES_RESPONSE));
+      if (href.includes("/accounts/list.json")) return new Response(JSON.stringify(ACCOUNTS_RESPONSE));
+      if (href.includes("/transaction/tags/list.json")) return new Response(JSON.stringify({ success: true, result: [] }));
+      if (href.includes("/transaction/tags/add.json")) {
+        return new Response(JSON.stringify({ success: true, result: { id: "700", name: body.name } }));
+      }
+      if (href.includes("/transactions/add.json")) {
+        const id = String(nextTransactionId++);
+        // Force the NEXT apStore call (addApPayment) to fail by pointing
+        // AP_DB_PATH at the broken path above, closing the cached handle so
+        // the route's next getDb() call re-opens (and fails) at it.
+        apStore._resetForTests();
+        process.env.AP_DB_PATH = join(brokenDir, "ap.db");
+        return new Response(JSON.stringify({ success: true, result: { id } }));
+      }
+      if (href.includes("/transactions/delete.json")) {
+        deleteCalled = true;
+        // Restore the real path before the route's compensating-delete
+        // catch block finishes, so afterEach's cleanup (and the assertions
+        // below) reach the real temp db again.
+        process.env.AP_DB_PATH = originalDbPath;
+        apStore._resetForTests();
+        return new Response(JSON.stringify({ success: true }));
+      }
+      throw new Error(`unexpected engine call in test: ${href}`);
+    }) as typeof fetch;
+
+    const res = await fetchHandler(
+      postPayment(rowId, { date: todayBangkok(), amountSatang: 4_000, paymentMethod: "cash" }),
+    );
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "ap_store_error" });
+    expect(deleteCalled).toBe(true);
+
+    const row = apStore.getApRow(rowId)!;
+    expect(row.payments.length).toBe(0);
+    expect(row.outstandingSatang).toBe(10_000);
+  });
+
+  test("L3 fix: a long creditor/item truncates but keeps the payment-kind marker intact", async () => {
+    const rowId = createRow({ creditor: "x".repeat(200), item: "y".repeat(200) });
+    // First payment (deposit), so the SECOND is an "installment" — the kind
+    // that carries the " (งวดที่ N)" marker this fix protects.
+    const firstRes = await fetchHandler(
+      postPayment(rowId, { date: todayBangkok(), amountSatang: 1_000, paymentMethod: "cash" }),
+    );
+    expect(firstRes.status).toBe(201);
+
+    const longEmail = `${"a".repeat(50)}@thehfhotel.org`;
+    const secondRes = await fetchHandler(
+      devRequestAs(longEmail, `/api/ap/rows/${rowId}/payments`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ date: todayBangkok(), amountSatang: 1_000, paymentMethod: "cash" }),
+      }),
+    );
+    expect(secondRes.status).toBe(201);
+
+    const addCalls = calls.filter((c) => c.url.includes("/transactions/add.json"));
+    const secondAddCall = addCalls[addCalls.length - 1];
+    const comment = (secondAddCall?.body as { comment: string }).comment;
+    expect(comment).toContain("(งวดที่ 1)");
+  });
 });
 
 describe("AP register: payment undo (mocked engine HTTP)", () => {
@@ -825,5 +1097,50 @@ describe("AP register: payment undo (mocked engine HTTP)", () => {
       devRequest(`/api/ap/rows/${otherRowId}/payments/${paymentId}`, { method: "DELETE" }),
     );
     expect(res.status).toBe(404);
+  });
+
+  test("H2b/L4 fix: undoing a payment whose linked transaction is already gone from the engine still succeeds — deletes the local record and returns 204", async () => {
+    const { rowId, paymentId } = seedRowWithPayment("999");
+    // Simulates a DANGLING local payment (H2b's own scenario — e.g. a
+    // previous undo's compensating delete already ran, or a manual delete
+    // via ezBookkeeping's own UI): get.json reports success:false rather
+    // than a real transaction, which src/server/engine.ts's
+    // getEngineTransaction now surfaces as EngineTransactionNotFoundError.
+    global.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/transactions/get.json")) {
+        return new Response(JSON.stringify({ success: false, errorMessage: "transaction not found" }));
+      }
+      throw new Error(`unexpected engine call in test: ${href}`);
+    }) as typeof fetch;
+
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${rowId}/payments/${paymentId}`, { method: "DELETE" }));
+    expect(res.status).toBe(204);
+    expect(apStore.getApPayment(rowId, paymentId)).toBeNull();
+    expect(apStore.getApRow(rowId)!.outstandingSatang).toBe(10_000);
+  });
+
+  test("L4 fix: the engine's own delete call reporting not-found during undo is not an error — still 204s and removes the local payment", async () => {
+    const { rowId, paymentId } = seedRowWithPayment("998");
+    transactionTimesById["998"] = buildTransactionUnixTimeSeconds(todayBangkok());
+
+    global.fetch = (async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/transactions/get.json")) {
+        const id = new URL(href).searchParams.get("id")!;
+        return new Response(JSON.stringify({ success: true, result: { id, time: transactionTimesById[id] } }));
+      }
+      if (href.includes("/transactions/delete.json")) {
+        // The double-undo race (L4): by the time this call runs, the
+        // transaction is already gone (e.g. a racing request's delete beat
+        // this one to it) — success:false here must not fail the whole undo.
+        return new Response(JSON.stringify({ success: false, errorMessage: "not found" }));
+      }
+      throw new Error(`unexpected engine call in test: ${href}`);
+    }) as typeof fetch;
+
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${rowId}/payments/${paymentId}`, { method: "DELETE" }));
+    expect(res.status).toBe(204);
+    expect(apStore.getApPayment(rowId, paymentId)).toBeNull();
   });
 });

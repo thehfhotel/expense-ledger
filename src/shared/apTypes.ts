@@ -43,8 +43,13 @@ export interface ApRow {
   entity: string;
   categoryCode: ExpenseCategoryCode;
   note: string;
-  /** ISO 8601 datetime (not just a date) — used as the "created month"
-   * fallback for month filtering and as the final sort tiebreaker. */
+  /** ISO 8601 datetime (UTC, not just a date) — used ONLY as the final
+   * insertion-order sort tiebreaker (ApPage.tsx's sortRows). M1 fix: the
+   * month-filter fallback used to slice THIS field, which put a row created
+   * 00:00-07:00 Bangkok on the 1st into the previous month (UTC's calendar
+   * date at that moment is still the prior month's last day); that fallback
+   * now runs server-side against apStore.ts's own `filed_date` (a Bangkok
+   * calendar date), which this interface never needs to expose. */
   createdAt: string;
   createdBy: string;
   /** The newest payment's date once outstanding <= 0, else null — the
@@ -135,9 +140,25 @@ export function computeOutstanding(
 
 /** The newest payment's date once outstanding <= 0, else null (spec §3, §6
  * "A row settled by an edit flips to จ่ายครบ with settledAt = the newest
- * payment's date"). Computed, never stored. */
-export function deriveSettledAt(payments: readonly { date: string }[], outstandingSatang: number): string | null {
-  if (outstandingSatang > 0 || payments.length === 0) return null;
+ * payment's date"). Computed, never stored.
+ *
+ * H3 fix: a row can be settled with ZERO payments — a discount or WHT alone
+ * brings outstanding to <= 0 at creation time (the credit-note case; create
+ * only rejects outstanding < 0, never === 0, and that's deliberate — spec
+ * §4). Such a row has no payment date to report, so this falls back to
+ * `filedDate` (the row's own Bangkok filing date, src/server/apStore.ts's
+ * `filed_date` column) instead of returning null — the previous null return
+ * here is exactly what made ApPage.tsx's `isoToBuddhist(row.settledAt!)`
+ * throw a white screen for these rows. `filedDate` is optional so existing
+ * 2-arg callers (and this file's own tests) keep returning null when no
+ * fallback is available. */
+export function deriveSettledAt(
+  payments: readonly { date: string }[],
+  outstandingSatang: number,
+  filedDate?: string,
+): string | null {
+  if (outstandingSatang > 0) return null;
+  if (payments.length === 0) return filedDate ?? null;
   return payments.reduce((latest, p) => (p.date > latest ? p.date : latest), payments[0]!.date);
 }
 
@@ -199,6 +220,17 @@ export function apTagName(rowId: string): string {
   return `ap:${rowId}`;
 }
 
+/** `" (มัดจำ)"` / `" (งวดที่ N)"` for a partial payment, `""` for a full
+ * settlement — split out from buildApPaymentComment (L3 fix) so
+ * src/server/server.ts's truncation step can shrink the "<creditor> -
+ * <รายการ>" prefix ALONE to fit the engine's comment-length budget while
+ * always keeping this marker intact. A generic end-trim would cut this
+ * suffix first, since buildApPaymentComment appends it as the FINAL
+ * characters — silently losing which installment a payment was. */
+export function paymentKindSuffix(kind: ApPaymentKind, installmentNumber: number | null): string {
+  return kind === "deposit" ? " (มัดจำ)" : kind === "installment" ? ` (งวดที่ ${installmentNumber})` : "";
+}
+
 /**
  * `"<ชื่อเจ้าหนี้> - <รายการ>"` suffixed `" (มัดจำ)"` / `" (งวดที่ N)"` for a
  * partial payment, plain for a full settlement (spec §5 "Ledger posting").
@@ -211,6 +243,5 @@ export function buildApPaymentComment(
   kind: ApPaymentKind,
   installmentNumber: number | null,
 ): string {
-  const suffix = kind === "deposit" ? " (มัดจำ)" : kind === "installment" ? ` (งวดที่ ${installmentNumber})` : "";
-  return `${creditor} - ${item}${suffix}`;
+  return `${creditor} - ${item}${paymentKindSuffix(kind, installmentNumber)}`;
 }

@@ -195,22 +195,93 @@ fork.
 
 ## Backup
 
-Nightly `tar` of the `expense_data` Docker volume — mirrors income-ledger's
-arrangement for `ledger_data`. It holds the engine's SQLite database
-(`/ezbookkeeping/data/ezbookkeeping.db`) and, per `EBK_STORAGE_LOCAL_FILESYSTEM_PATH`
-in docker-compose.yml, all uploaded receipt photos under
-`/ezbookkeeping/data/storage` — everything the engine owns lives under that
-one mount, so one volume backup covers both the ledger and every receipt
-image.
+**On evergreen:** a systemd timer, `expense-ledger-backup.timer` (03:30
+Bangkok time nightly, `Persistent=true` so a down host still catches up on
+next boot), runs `/usr/local/bin/backup-expense-ledger.sh` as root — systemd
+timer, not cron, because this host has no cron package installed at all
+(every other per-app estate backup here — `loyalty-backup`, `seafile-backup`
+— already uses a systemd timer for the same reason). It `tar`s BOTH Docker
+volumes below, whole-directory (not just the `.db` file, so a live
+`-wal`/`-shm` sqlite journal sibling is captured too), into
+`/srv/backups/expense/<volume>_<UTC timestamp>.tar.gz`, keeping the most
+recent 14 archives per volume. Docker on this host is snap-packaged, which
+confines bind-mount source paths to `/home/*` and `/root` (verified: a write
+into a bind mount under `/srv` or `/tmp` silently goes nowhere) — so the
+script stages each `tar` under a private `/root` subdirectory first, then
+does a plain host-level `mv` into `/srv/backups/expense`, never bind-mounting
+that directory into a container directly.
 
-The AP register ("ค้างจ่าย" tab) has its own SEPARATE nightly `tar` of the
-`expense_ap` Docker volume (`/app/data/ap.db`, the frontend container's own
-bun:sqlite database — see CLAUDE.md's "AP register storage exception"). This
-is intentionally a second, independent backup line: `expense_ap` lives on the
-frontend container, not the engine, and holds creditor/due-date/payment-
-history bookkeeping that has no ezBookkeeping equivalent — losing it would
-lose the register even though every posted payment is still separately
-recoverable from the engine's own transaction history.
+*(As of 2026-07-31's AP-register audit, NEITHER this app's volumes nor
+income-ledger's own `ledger_data` had any backup coverage at all — this
+repo's docs previously claimed a nightly tar "mirroring income-ledger's
+arrangement", which did not exist on either side. The mechanism above is
+what's actually installed now; income-ledger's equivalent gap is a separate,
+not-yet-addressed follow-up outside this repo.)*
+
+- **`expense_data`** (the engine's own volume): holds the engine's SQLite
+  database (`/ezbookkeeping/data/ezbookkeeping.db`) and, per
+  `EBK_STORAGE_LOCAL_FILESYSTEM_PATH` in docker-compose.yml, all uploaded
+  receipt photos under `/ezbookkeeping/data/storage` — everything the engine
+  owns lives under that one mount, so one volume backup covers both the
+  ledger and every receipt image.
+- **`expense_ap`** (the AP register's — "ค้างจ่าย" tab — own volume,
+  `/app/data/ap.db`, the FRONTEND container's own bun:sqlite database — see
+  CLAUDE.md's "AP register storage exception"): a genuinely separate backup
+  target from `expense_data`, since it lives on a different container and
+  holds creditor/due-date/payment-history bookkeeping that has no
+  ezBookkeeping equivalent — losing it would lose the register even though
+  every posted payment is still separately recoverable from the engine's own
+  transaction history (see "AP register reconciliation" below).
+
+Restoring either volume: stop the affected container, extract the chosen
+archive over the volume's data directory (`docker run --rm -v
+<volume>:/target -v /srv/backups/expense:/backup:ro alpine sh -c "rm -rf
+/target/* && tar xzf /backup/<archive> -C /target"`), then restart.
+
+## AP register reconciliation
+
+`scripts/reconcile-ap.ts` (report-only, never writes) diffs the AP
+register's own payment rows against every `ap:<rowId>`-tagged transaction in
+the engine, and reports:
+
+- **dangling local payments** — an `ap_payment` row whose linked transaction
+  id no longer exists in the engine at all (e.g. a payment-undo whose
+  compensating step failed after the engine-side delete already succeeded),
+- **orphan engine transactions** — an `ap:`-tagged engine transaction with no
+  local `ap_payment` row referencing it (e.g. the ledger posted but the
+  local insert failed, and even the compensating delete failed).
+
+Exits 1 on any mismatch, 0 (with "OK") otherwise; a register that has never
+been used yet (no `ap.db` file) is trivially clean and needs no engine call
+at all.
+
+This is the one script in `scripts/` that also needs DIRECT read access to
+the AP register's own sqlite file (`src/server/apStore.ts`'s `ap.db` — this
+repo's one database of its own, CLAUDE.md's "AP register storage exception")
+alongside the usual engine access — there is no HTTP surface for that store.
+Since `scripts/` ships inside the production image (`Dockerfile`'s `COPY
+scripts ./scripts`, both stages), the simplest way to reach both at once is
+to run it INSIDE the already-running `expense-ledger` container, where
+`/app/data/ap.db` is already the real, correctly-mounted file (no
+`AP_DB_PATH` override needed) and the engine is reachable at its
+compose-network hostname:
+
+```sh
+docker exec expense-ledger sh -c \
+  'EBK_URL=http://expense-ledger-engine:8080 EBK_TOKEN=$ENGINE_API_TOKEN \
+   bun scripts/reconcile-ap.ts'
+```
+
+(`EBK_TOKEN` reuses the container's own `ENGINE_API_TOKEN` — same
+credential, read via a different env var name purely because that is this
+script family's existing convention, see "Migration runbook" above.) Running
+it from an operator's own shell instead (over an SSH tunnel to the engine's
+loopback port, `EBK_URL` defaulting to `http://127.0.0.1:4051`) also works
+for the engine side, but still needs `AP_DB_PATH` pointed at a copy of the
+sqlite file — extract one first with `docker run --rm -v expense_ap:/from:ro
+-v /root:/to alpine cp /from/ap.db /to/ap-snapshot.db` (run as root, since
+snap-packaged Docker on evergreen only bind-mounts `/home/*`/`/root` — see
+"Backup" above).
 
 ## ezBookkeeping API notes (dev reference)
 

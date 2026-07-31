@@ -7,6 +7,7 @@ import {
   deriveSettledAt,
   deriveStatus,
   derivePaymentKind,
+  paymentKindSuffix,
   statusRank,
   type ApPayment,
 } from "./apTypes.ts";
@@ -59,8 +60,16 @@ describe("deriveSettledAt", () => {
     expect(deriveSettledAt([{ date: "2026-07-01" }], 100)).toBeNull();
   });
 
-  test("null with no payments at all, even if outstanding is somehow <= 0", () => {
+  test("null with no payments and no filedDate fallback provided (2-arg call)", () => {
     expect(deriveSettledAt([], 0)).toBeNull();
+  });
+
+  test("H3 fix: falls back to filedDate when settled with ZERO payments (credit-note case — a discount/WHT alone brought outstanding to <= 0)", () => {
+    expect(deriveSettledAt([], 0, "2026-07-15")).toBe("2026-07-15");
+  });
+
+  test("H3 fix: the filedDate fallback also applies at a negative outstanding with zero payments", () => {
+    expect(deriveSettledAt([], -50, "2026-07-15")).toBe("2026-07-15");
   });
 
   test("the newest payment date once outstanding is settled", () => {
@@ -70,6 +79,10 @@ describe("deriveSettledAt", () => {
 
   test("settled at a negative outstanding too (over-discount edge case)", () => {
     expect(deriveSettledAt([{ date: "2026-07-05" }], -100)).toBe("2026-07-05");
+  });
+
+  test("a payment date wins over filedDate even when both are present", () => {
+    expect(deriveSettledAt([{ date: "2026-07-05" }], 0, "2026-01-01")).toBe("2026-07-05");
   });
 });
 
@@ -135,6 +148,20 @@ describe("derivePaymentKind", () => {
 describe("apTagName", () => {
   test("formats as ap:<rowId>", () => {
     expect(apTagName("abc-123")).toBe("ap:abc-123");
+  });
+});
+
+describe("paymentKindSuffix (L3 fix — split out so a truncation step can keep this intact)", () => {
+  test("no suffix for a full settlement", () => {
+    expect(paymentKindSuffix("full", null)).toBe("");
+  });
+
+  test("มัดจำ for a deposit", () => {
+    expect(paymentKindSuffix("deposit", null)).toBe(" (มัดจำ)");
+  });
+
+  test("งวดที่ N for an installment", () => {
+    expect(paymentKindSuffix("installment", 3)).toBe(" (งวดที่ 3)");
   });
 });
 

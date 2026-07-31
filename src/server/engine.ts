@@ -334,11 +334,29 @@ export async function getMonthExpenseTransactions(monthIso: string): Promise<Exp
   return res.result.items.map(mapEngineTransaction);
 }
 
+/** Thrown by getEngineTransaction/deleteExpenseTransaction when the engine
+ * responds (a well-formed JSON envelope) with success:false for a specific
+ * transaction id — as opposed to a network-level failure (fetch() itself
+ * throwing, or invalid JSON), which still surfaces as a plain Error. The AP
+ * payment-undo route (src/server/server.ts, H2b / L4 fix) catches this
+ * SPECIFICALLY: a missing/already-deleted engine transaction during undo
+ * means the desired end state (no ledger row, no local payment) is already
+ * reached, not a real failure. Every OTHER caller (ordinary expense
+ * edit/delete's current-month lock, the AP payment-create compensating
+ * delete) still just sees an Error via its existing generic catch — this is
+ * purely an additive discriminator, not a behavior change for them. */
+export class EngineTransactionNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EngineTransactionNotFoundError";
+  }
+}
+
 async function getEngineTransaction(id: string): Promise<EngineTransactionRaw> {
   const res = await engineFetch<EngineTransactionRaw>(
     `/transactions/get.json?id=${encodeURIComponent(id)}&with_pictures=true`,
   );
-  if (!res.success || !res.result) throw new Error(res.errorMessage || "transaction not found");
+  if (!res.success || !res.result) throw new EngineTransactionNotFoundError(res.errorMessage || "transaction not found");
   return res.result;
 }
 
@@ -348,6 +366,26 @@ async function getEngineTransaction(id: string): Promise<EngineTransactionRaw> {
 export async function getExpenseTransactionDate(id: string): Promise<string> {
   const existing = await getEngineTransaction(id);
   return deriveDateFromEngineTime(existing.time);
+}
+
+/** True when transaction `id` carries any `ap:<rowId>` tag (H2 fix,
+ * orchestrator ruling): every route OUTSIDE the AP register's own
+ * apStore.ts/this file's AP payment-posting path must refuse to touch a
+ * transaction the register manages, so the register and the ordinary
+ * month view can never quietly disagree about what happened to a payment.
+ * Resolves the transaction's tagIds (numeric engine ids, no name attached)
+ * against the engine's own tag list — the same call getOrCreateApTag below
+ * already uses — rather than guessing a rowId from comment text. */
+export async function isApManagedTransaction(id: string): Promise<boolean> {
+  const existing = await getEngineTransaction(id);
+  const tagIds = extractTagIds(existing);
+  if (tagIds.length === 0) return false;
+  const listRes = await engineFetch<EngineTag[]>("/transaction/tags/list.json");
+  if (!listRes.success || !listRes.result) {
+    throw new Error(listRes.errorMessage || "failed to list ezBookkeeping tags");
+  }
+  const apTagIds = new Set(listRes.result.filter((t) => t.name.startsWith("ap:")).map((t) => t.id));
+  return tagIds.some((tagId) => apTagIds.has(tagId));
 }
 
 /** POST /api/v1/transactions/add.json. `email` is the verified Access
@@ -412,7 +450,11 @@ export async function deleteExpenseTransaction(id: string): Promise<void> {
     method: "POST",
     body: JSON.stringify({ id }),
   });
-  if (!res.success) throw new Error(res.errorMessage || "failed to delete transaction");
+  // H2b / L4 fix: success:false here (not-found, already deleted) throws the
+  // same discriminated error as getEngineTransaction above — see its doc
+  // comment. Every caller except the AP payment-undo route still treats this
+  // as a plain failure via its existing generic catch.
+  if (!res.success) throw new EngineTransactionNotFoundError(res.errorMessage || "failed to delete transaction");
 }
 
 /**
@@ -487,30 +529,56 @@ interface EngineTag {
  * the list call below — no different than the category/account caches). */
 let apTagCache = new Map<string, string>();
 
-async function getOrCreateApTag(rowId: string): Promise<string> {
-  const tagName = apTagName(rowId);
-  const cached = apTagCache.get(rowId);
-  if (cached) return cached;
-
+/** Lists tags and returns the id of the one named `tagName`, or null. Split
+ * out of getOrCreateApTag (M4 fix) so it can be called a second time as a
+ * duplicate-name recovery step, without duplicating the list/find logic. */
+async function findApTagByName(tagName: string): Promise<string | null> {
   const listRes = await engineFetch<EngineTag[]>("/transaction/tags/list.json");
   if (!listRes.success || !listRes.result) {
     throw new Error(listRes.errorMessage || "failed to list ezBookkeeping tags");
   }
   const existing = listRes.result.find((t) => t.name === tagName);
+  return existing ? existing.id : null;
+}
+
+async function getOrCreateApTag(rowId: string): Promise<string> {
+  const tagName = apTagName(rowId);
+  const cached = apTagCache.get(rowId);
+  if (cached) return cached;
+
+  const existing = await findApTagByName(tagName);
   if (existing) {
-    apTagCache.set(rowId, existing.id);
-    return existing.id;
+    apTagCache.set(rowId, existing);
+    return existing;
   }
 
   const addRes = await engineFetch<EngineTag>("/transaction/tags/add.json", {
     method: "POST",
     body: JSON.stringify({ name: tagName }),
   });
-  if (!addRes.success || !addRes.result) {
-    throw new Error(addRes.errorMessage || "failed to create ezBookkeeping tag");
+  if (addRes.success && addRes.result) {
+    apTagCache.set(rowId, addRes.result.id);
+    return addRes.result.id;
   }
-  apTagCache.set(rowId, addRes.result.id);
-  return addRes.result.id;
+
+  // M4 fix: this process's own AP writes are serialized by
+  // src/server/server.ts's withApWriteLock, but that mutex is per-process —
+  // a brief old/new container overlap during a rolling deploy (or, in
+  // principle, a second process) could still create the SAME tag name
+  // between our list call above and this add call. ezBookkeeping rejects a
+  // duplicate tag name; treat that specific rejection as success by
+  // re-listing and using whatever tag is there now, rather than failing a
+  // payment that could otherwise post cleanly. If the tag still isn't there,
+  // this genuinely wasn't a duplicate-name race (e.g. the engine is down) —
+  // throw the original error. No tag GC: the failed add created nothing to
+  // clean up, so there is nothing to skip except a cleanup step that was
+  // never needed in the first place.
+  const retryFound = await findApTagByName(tagName);
+  if (retryFound) {
+    apTagCache.set(rowId, retryFound);
+    return retryFound;
+  }
+  throw new Error(addRes.errorMessage || "failed to create ezBookkeeping tag");
 }
 
 export interface CreateApPaymentTransactionInput {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { SessionExpiredError, listApRows } from "../api.ts";
+import { EngineUnreachableError, SessionExpiredError, listApRows } from "../api.ts";
 import { navigate } from "../App.tsx";
 import { currentMonthBangkok, isoToBuddhist, monthToThaiLong, shiftMonths, todayBangkok } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
@@ -13,7 +13,19 @@ import {
 } from "../../shared/apTypes.ts";
 import { ApPaymentForm } from "../components/ApPaymentForm.tsx";
 import { ApRowDrawer } from "../components/ApRowDrawer.tsx";
-import { AP, AP_EMPTY, AP_FIELDS, AP_PAY, AP_STATUS, EMPTY_VALUE, LOADING, MONTH_HEADER, loadFailedDetail } from "../labels.ts";
+import {
+  AP,
+  AP_EMPTY,
+  AP_FIELDS,
+  AP_PAY,
+  AP_STATUS,
+  AP_STORE_ERROR,
+  EMPTY_VALUE,
+  ENGINE_ERROR,
+  LOADING,
+  MONTH_HEADER,
+  loadFailedDetail,
+} from "../labels.ts";
 
 interface Props {
   filter: ApListFilter;
@@ -74,8 +86,19 @@ export function ApPage({ filter }: Props) {
     return listApRows(filter)
       .then((res) => setData(res))
       .catch((err) => {
+        // L1 fix: never show a raw English error token — ap_store_error
+        // (the AP register's own sqlite failing) and engine_unreachable each
+        // get their own distinct Thai message; anything else falls back to
+        // the raw message (still not ideal, but at least not one of these
+        // two commonly-hit tokens).
         if (err instanceof SessionExpiredError) return;
-        setLoadError(err instanceof Error ? err.message : String(err));
+        if (err instanceof EngineUnreachableError) {
+          setLoadError(ENGINE_ERROR.message);
+        } else if (err instanceof Error && err.message === "ap_store_error") {
+          setLoadError(AP_STORE_ERROR.detail);
+        } else {
+          setLoadError(err instanceof Error ? err.message : String(err));
+        }
       });
   }
 
@@ -284,7 +307,12 @@ export function ApPage({ filter }: Props) {
                     <span>
                       {isSettled ? (
                         <span className="text-xs font-medium text-ok">
-                          {AP_STATUS.settledOn(isoToBuddhist(row.settledAt!))}
+                          {/* H3 fix: settledAt is null-guarded even though the
+                              server now derives a fallback date for a
+                              zero-payment settled row — a stale client or an
+                              edge case not yet accounted for must never white-
+                              screen here. */}
+                          {AP_STATUS.settledOn(row.settledAt ? isoToBuddhist(row.settledAt) : EMPTY_VALUE)}
                         </span>
                       ) : (
                         <span
@@ -352,7 +380,8 @@ export function ApPage({ filter }: Props) {
                     </span>
                     {isSettled ? (
                       <span className="text-xs font-medium text-ok">
-                        {AP_STATUS.settledOn(isoToBuddhist(row.settledAt!))}
+                        {/* H3 fix — see the desktop grid's identical guard above. */}
+                        {AP_STATUS.settledOn(row.settledAt ? isoToBuddhist(row.settledAt) : EMPTY_VALUE)}
                       </span>
                     ) : (
                       <span

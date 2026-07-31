@@ -5,6 +5,7 @@
 // drives this through fetchHandler/GET /healthz rather than importing this
 // module directly — see that file's "AP store lazy-open" describe block.
 
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,7 @@ import {
   listCreditorHints,
   updateApRow,
 } from "./apStore.ts";
+import { todayBangkok } from "../shared/date.ts";
 import type { ApRowInput } from "../shared/apTypes.ts";
 
 let tmpDir: string;
@@ -151,6 +153,20 @@ describe("payments and settlement", () => {
   });
 });
 
+describe("settled with zero payments (H3 fix — credit-note case)", () => {
+  test("a discount equal to the gross amount settles the row at creation with a non-null settledAt", () => {
+    const id = createApRow(baseRowInput({ amountSatang: 5_000, vatSatang: null, whtSatang: null, discountSatang: 5_000 }), "clerk@thehfhotel.org");
+    const row = getApRow(id)!;
+    expect(row.outstandingSatang).toBe(0);
+    expect(row.payments.length).toBe(0);
+    expect(row.settledAt).not.toBeNull();
+    // Falls back to the row's own Bangkok filing date (today, since this
+    // test just created it) — never the null that used to crash
+    // ApPage.tsx's isoToBuddhist(row.settledAt!) render (H3).
+    expect(row.settledAt).toBe(todayBangkok());
+  });
+});
+
 describe("deleteApRow — void rule", () => {
   test("deletes a row with zero payments", () => {
     const id = createApRow(baseRowInput(), "clerk@thehfhotel.org");
@@ -205,12 +221,34 @@ describe("listApRows filters", () => {
     expect(rows.map((r) => r.id)).toEqual([july]);
   });
 
-  test("mode=month falls back to the created month when the due date is blank", () => {
+  test("mode=month falls back to the FILING month when the due date is blank", () => {
     const id = createApRow(baseRowInput({ creditor: "No Due Date Co", dueDate: null }), "clerk@thehfhotel.org");
-    const row = getApRow(id)!;
-    const createdMonth = row.createdAt.slice(0, 7);
-    const rows = listApRows({ mode: "month", month: createdMonth });
+    const rows = listApRows({ mode: "month", month: todayBangkok().slice(0, 7) });
     expect(rows.map((r) => r.id)).toContain(id);
+  });
+
+  test("M1 fix: the month fallback uses the Bangkok filed_date, not created_at's UTC calendar date", () => {
+    // Simulates a row created 00:00-07:00 Bangkok on the 1st: created_at (a
+    // UTC timestamp) still reads the LAST day of the PREVIOUS month at that
+    // moment, but filed_date (computed from todayBangkok() at insert time)
+    // correctly reads the new month. Manipulated directly via raw SQL —
+    // apStore's public API has no seam to fake "now" — to prove the filter
+    // reads filed_date and NOT created_at.slice(0, 7).
+    const id = createApRow(baseRowInput({ creditor: "Edge Case Co", dueDate: null }), "clerk@thehfhotel.org");
+    const db = new Database(process.env.AP_DB_PATH!);
+    db.query("UPDATE ap_row SET created_at = ?, filed_date = ? WHERE id = ?").run(
+      "2026-07-31T20:00:00.000Z", // UTC — still July 31 in UTC
+      "2026-08-01", // but already Aug 1 in Bangkok (UTC+7)
+      id,
+    );
+    db.close();
+    _resetForTests(); // re-open so the next call sees the raw UPDATE above
+
+    const augustRows = listApRows({ mode: "month", month: "2026-08" });
+    expect(augustRows.map((r) => r.id)).toContain(id);
+
+    const julyRows = listApRows({ mode: "month", month: "2026-07" });
+    expect(julyRows.map((r) => r.id)).not.toContain(id);
   });
 });
 

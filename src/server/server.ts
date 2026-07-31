@@ -8,18 +8,20 @@ import {
   createExpenseTransaction,
   deleteExpenseTransaction,
   detachExpensePhoto,
+  EngineTransactionNotFoundError,
   getExpenseTransactionDate,
   getMonthExpenseTransactions,
+  isApManagedTransaction,
   modifyExpenseTransaction,
 } from "./engine.ts";
 import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution.ts";
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
 import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "../shared/date.ts";
 import {
-  buildApPaymentComment,
   computeGross,
   computeOutstanding,
   derivePaymentKind,
+  paymentKindSuffix,
   type ApListFilter,
   type ApPaymentInput,
   type ApRowInput,
@@ -141,19 +143,92 @@ function commentBudgetResponse(comment: string, email: string): Response | null 
   return null;
 }
 
-/** Unlike commentBudgetResponse (which REJECTS a clerk-typed comment over
- * budget), an AP payment's comment is server-composed from creditor/รายการ
- * text (spec §5 "Ledger posting" — "truncated so attributedCommentLength()
- * stays ≤ ENGINE_COMMENT_MAX_RUNES") — there is no clerk-facing field to
- * blame, so this truncates rather than 400s. Trims from the end one
- * character at a time; the budget margin this needs to close is always tiny
- * in practice (creditor/รายการ are already bounded to 200 chars each). */
+/** Generic end-trim fallback for an over-budget comment — see
+ * truncateApPaymentComment below (L3 fix) for the AP payment path, which
+ * calls this only as a last resort so the payment-kind marker never gets cut
+ * first. Trims from the end one character at a time. */
 function truncateForAttributionBudget(comment: string, email: string): string {
   let result = comment;
   while (result.length > 0 && attributedCommentLength(result, email) > ENGINE_COMMENT_MAX_RUNES) {
     result = result.slice(0, -1);
   }
   return result;
+}
+
+/** Composes an AP payment's ledger comment ("<creditor> - <รายการ>" plus a
+ * "(มัดจำ)"/"(งวดที่ N)" marker) and truncates it to fit the engine's
+ * attribution-inclusive comment budget WITHOUT ever cutting into the marker
+ * (L3 fix). truncateForAttributionBudget's generic end-trim would remove the
+ * marker FIRST, since it's appended as the comment's final characters —
+ * silently losing which installment a payment was. Shrinks the "<creditor> -
+ * <รายการ>" prefix instead, down to nothing if it must, keeping the marker
+ * intact every time; only if the marker plus attribution alone still doesn't
+ * fit (unreachable in practice — see attribution.ts's ENGINE_COMMENT_MAX_RUNES
+ * doc comment) does this fall back to the generic trim rather than fail
+ * outright. */
+function truncateApPaymentComment(
+  creditor: string,
+  item: string,
+  kind: Parameters<typeof paymentKindSuffix>[0],
+  installmentNumber: number | null,
+  email: string,
+): string {
+  const suffix = paymentKindSuffix(kind, installmentNumber);
+  let prefix = `${creditor} - ${item}`;
+  let comment = `${prefix}${suffix}`;
+  while (prefix.length > 0 && attributedCommentLength(comment, email) > ENGINE_COMMENT_MAX_RUNES) {
+    prefix = prefix.slice(0, -1);
+    comment = `${prefix}${suffix}`;
+  }
+  if (attributedCommentLength(comment, email) > ENGINE_COMMENT_MAX_RUNES) {
+    return truncateForAttributionBudget(comment, email);
+  }
+  return comment;
+}
+
+// ── AP register write serialization (H1 fix) ────────────────────────────────
+// Two overlapping AP writes against the same row — the dangerous case being
+// two concurrent payment posts — each used to read their own stale
+// `outstanding` snapshot, both pass their own "amount <= outstanding" check,
+// and both post to the engine: double-booking it and driving the LOCAL
+// outstanding negative (probe-confirmed: two overlapping payments on one row
+// drove outstanding to -10000). A single global promise-chain mutex
+// serializes every AP write route's read -> engine-call -> local-insert
+// critical section, so only one AP write is ever "in flight" process-wide —
+// correct at this app's scale (one clerk-facing store, a single container,
+// no horizontal scaling) and far simpler than per-row locking. Every AP
+// write route (row create/patch/delete, payment create, payment undo) is
+// wrapped, even the ones with no obvious cross-request race today, so there
+// is exactly one queue to reason about rather than a per-route judgment call.
+let apWriteQueue: Promise<void> = Promise.resolve();
+
+/** Runs `fn` only after every previously queued AP write has fully settled,
+ * and makes the NEXT queued write wait for `fn` to settle in turn — a strict
+ * FIFO chain, not a semaphore. `fn`'s own success/failure is returned to
+ * THIS call's caller unchanged; it never poisons the chain for subsequent
+ * callers (the queue tail always defuses to a resolved no-op via the trailing
+ * `.then(() => undefined, () => undefined)`). */
+function withApWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = apWriteQueue.then(fn);
+  apWriteQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+// ── Content-type gate (M5 fix) ──────────────────────────────────────────────
+// A write route that expects a JSON body now rejects anything else with 415
+// BEFORE ever attempting to parse it — applies to every /api and /api/ap
+// write route that takes a JSON body (POST/PATCH). Routes that legitimately
+// take no body (DELETE) or a different body shape (the multipart photo
+// upload) are deliberately not gated by this.
+function unsupportedMediaTypeResponse(req: Request): Response | null {
+  const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
+  if (!contentType.includes("application/json")) {
+    return json(415, { error: "unsupported content type" });
+  }
+  return null;
 }
 
 async function readJsonBody(req: Request): Promise<unknown> {
@@ -275,10 +350,18 @@ function validateApRowInput(body: unknown): ValidatedApRowInput {
 
   // กำหนดชำระ is optional and UNBOUNDED (spec §4 item 10 — "past dates
   // allowed, carried-forward bills are the norm"), unlike ordinary expense
-  // dates: no future-date rule, no current-month rule.
+  // dates: no future-date rule, no current-month rule. L6 fix: still bounded
+  // to a sane calendar-year RANGE (2000-2100) — the paper workbook this
+  // register replaces genuinely contains a "1969" typo (almost certainly a
+  // misclicked date-picker year spinner, or a stray "69" meant as a 2569 พ.ศ.
+  // shorthand landing in the wrong field), and an unbounded year would let
+  // that kind of typo silently distort the "เกินกำหนด" sort/status math for
+  // years.
   let dueDate: string | null = null;
   if (b.dueDate !== undefined && b.dueDate !== null && b.dueDate !== "") {
     if (typeof b.dueDate !== "string" || !isValidIso(b.dueDate)) return { ok: false, error: "invalid dueDate" };
+    const dueYear = Number(b.dueDate.slice(0, 4));
+    if (dueYear < 2000 || dueYear > 2100) return { ok: false, error: "invalid dueDate" };
     dueDate = b.dueDate;
   }
 
@@ -407,6 +490,8 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/expenses") {
+    const mediaTypeError = unsupportedMediaTypeResponse(req);
+    if (mediaTypeError) return mediaTypeError;
     const validated = validateExpenseInput(await readJsonBody(req));
     if (!validated.ok) return json(400, { error: validated.error });
     const budgetError = commentBudgetResponse(validated.value.comment, identity.email);
@@ -422,11 +507,21 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     const id = expenseMatch[1]!;
 
     if (method === "PATCH") {
+      const mediaTypeError = unsupportedMediaTypeResponse(req);
+      if (mediaTypeError) return mediaTypeError;
       const validated = validateExpenseInput(await readJsonBody(req));
       if (!validated.ok) return json(400, { error: validated.error });
       const budgetError = commentBudgetResponse(validated.value.comment, identity.email);
       if (budgetError) return budgetError;
       return withEngine(async () => {
+        // H2 fix: a transaction the AP register manages (carries an
+        // `ap:<rowId>` tag) is refused here UNCONDITIONALLY, current month
+        // or not — it must only ever be edited through the ค้างจ่าย tab, so
+        // the two stores can never silently disagree about what a payment's
+        // amount/date/category is. Checked before the month lock so the
+        // clerk gets the specific "manage it from ค้างจ่าย" message rather
+        // than a generic "current month only" one.
+        if (await isApManagedTransaction(id)) return json(409, { error: "ap_managed" });
         const locked = await currentMonthLockResponse(id);
         if (locked) return locked;
         await modifyExpenseTransaction(id, validated.value, identity.email);
@@ -436,6 +531,8 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
 
     if (method === "DELETE") {
       return withEngine(async () => {
+        // H2 fix — see the PATCH branch's comment above.
+        if (await isApManagedTransaction(id)) return json(409, { error: "ap_managed" });
         const locked = await currentMonthLockResponse(id);
         if (locked) return locked;
         await deleteExpenseTransaction(id);
@@ -500,16 +597,20 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   }
 
   if (method === "POST" && path === "/ap/rows") {
+    const mediaTypeError = unsupportedMediaTypeResponse(req);
+    if (mediaTypeError) return mediaTypeError;
     const validated = validateApRowInput(await readJsonBody(req));
     if (!validated.ok) return json(400, { error: validated.error });
     const gross = computeGross(validated.value.amountSatang, validated.value.vatSatang, validated.value.whtSatang);
     if (computeOutstanding(gross, [], validated.value.discountSatang) < 0) {
       return json(400, { error: "negative outstanding" });
     }
-    return withApStore(() => {
-      const id = apStore.createApRow(validated.value, identity.email);
-      return json(201, { id });
-    });
+    return withApWriteLock(() =>
+      withApStore(() => {
+        const id = apStore.createApRow(validated.value, identity.email);
+        return json(201, { id });
+      }),
+    );
   }
 
   const apRowMatch = path.match(/^\/ap\/rows\/([^/]+)$/);
@@ -517,134 +618,186 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     const id = apRowMatch[1]!;
 
     if (method === "PATCH") {
+      const mediaTypeError = unsupportedMediaTypeResponse(req);
+      if (mediaTypeError) return mediaTypeError;
       const validated = validateApRowInput(await readJsonBody(req));
       if (!validated.ok) return json(400, { error: validated.error });
-      return withApStore(() => {
-        const existing = apStore.getApRow(id);
-        if (!existing) return json(404, { error: "not found" });
-        const gross = computeGross(validated.value.amountSatang, validated.value.vatSatang, validated.value.whtSatang);
-        if (computeOutstanding(gross, existing.payments, validated.value.discountSatang) < 0) {
-          return json(400, { error: "negative outstanding" });
-        }
-        apStore.updateApRow(id, validated.value);
-        return json(200, { id });
-      });
+      return withApWriteLock(() =>
+        withApStore(() => {
+          // H1 fix: re-read the row (and therefore its payments/outstanding)
+          // INSIDE the write lock, immediately before validating and writing
+          // — an overlapping payment or edit against the same row can never
+          // interleave between this read and the write below.
+          const existing = apStore.getApRow(id);
+          if (!existing) return json(404, { error: "not found" });
+          const gross = computeGross(validated.value.amountSatang, validated.value.vatSatang, validated.value.whtSatang);
+          if (computeOutstanding(gross, existing.payments, validated.value.discountSatang) < 0) {
+            return json(400, { error: "negative outstanding" });
+          }
+          apStore.updateApRow(id, validated.value);
+          return json(200, { id });
+        }),
+      );
     }
 
     if (method === "DELETE") {
-      return withApStore(() => {
-        const existing = apStore.getApRow(id);
-        if (!existing) return json(404, { error: "not found" });
-        try {
-          apStore.deleteApRow(id);
-        } catch (err) {
-          if (err instanceof apStore.ApRowHasPaymentsError) return json(409, { error: "has_payments" });
-          throw err;
-        }
-        return new Response(null, { status: 204 });
-      });
+      return withApWriteLock(() =>
+        withApStore(() => {
+          const existing = apStore.getApRow(id);
+          if (!existing) return json(404, { error: "not found" });
+          try {
+            apStore.deleteApRow(id);
+          } catch (err) {
+            if (err instanceof apStore.ApRowHasPaymentsError) return json(409, { error: "has_payments" });
+            throw err;
+          }
+          return new Response(null, { status: 204 });
+        }),
+      );
     }
   }
 
   const apPaymentsMatch = path.match(/^\/ap\/rows\/([^/]+)\/payments$/);
   if (method === "POST" && apPaymentsMatch) {
     const rowId = apPaymentsMatch[1]!;
+    const mediaTypeError = unsupportedMediaTypeResponse(req);
+    if (mediaTypeError) return mediaTypeError;
     const validated = validateApPaymentInput(await readJsonBody(req));
     if (!validated.ok) return json(400, { error: validated.error });
 
-    let row: ReturnType<typeof apStore.getApRow>;
-    try {
-      row = apStore.getApRow(rowId);
-    } catch (err) {
-      console.error("[ap-store]", err instanceof Error ? err.message : err);
-      return json(500, { error: "ap_store_error" });
-    }
-    if (!row) return json(404, { error: "not found" });
-    if (validated.value.amountSatang > row.outstandingSatang) {
-      return json(400, { error: "amount exceeds outstanding" });
-    }
+    // H1 fix: the ENTIRE read -> validate -> engine-post -> local-insert
+    // critical section runs inside the write lock, so two overlapping
+    // payment requests against the same row can never both see the same
+    // stale `outstanding` snapshot — the second one to run always re-reads
+    // the row fresh, after the first's write (if any) has already landed.
+    return withApWriteLock(() =>
+      withEngine(async () => {
+        let row: ReturnType<typeof apStore.getApRow>;
+        try {
+          row = apStore.getApRow(rowId);
+        } catch (err) {
+          console.error("[ap-store]", err instanceof Error ? err.message : err);
+          return json(500, { error: "ap_store_error" });
+        }
+        if (!row) return json(404, { error: "not found" });
 
-    // Every derivation below (kind, comment) is computed synchronously from
-    // data already in hand, BEFORE any engine call — so a comment-budget
-    // rejection or the outstanding check above can never leave a half-posted
-    // payment. Only the engine call + local insert are wrapped in withEngine.
-    const settles = validated.value.amountSatang >= row.outstandingSatang;
-    const { kind, installmentNumber } = derivePaymentKind(row.payments, settles);
-    const rawComment = buildApPaymentComment(row.creditor, row.item, kind, installmentNumber);
-    const comment = truncateForAttributionBudget(rawComment, identity.email);
+        // Invariant enforcement: outstanding must never go negative on the
+        // payment path (H1 fix) — reject an overpayment against the
+        // FRESHLY re-read balance rather than one read before the lock.
+        const projectedOutstanding = row.outstandingSatang - validated.value.amountSatang;
+        if (projectedOutstanding < 0) {
+          return json(400, { error: "amount exceeds outstanding" });
+        }
 
-    return withEngine(async () => {
-      const transactionId = await createApPaymentTransaction({
-        date: validated.value.date,
-        amountSatang: validated.value.amountSatang,
-        categoryCode: row!.categoryCode,
-        paymentMethod: validated.value.paymentMethod,
-        comment,
-        email: identity.email,
-        apRowId: rowId,
-      });
-      try {
-        const paymentId = apStore.addApPayment(rowId, {
+        const settles = projectedOutstanding === 0;
+        const { kind, installmentNumber } = derivePaymentKind(row.payments, settles);
+        // L3 fix: truncates the "<creditor> - <รายการ>" text, never the
+        // "(มัดจำ)"/"(งวดที่ N)" marker — see truncateApPaymentComment's doc
+        // comment.
+        const comment = truncateApPaymentComment(row.creditor, row.item, kind, installmentNumber, identity.email);
+
+        const transactionId = await createApPaymentTransaction({
           date: validated.value.date,
           amountSatang: validated.value.amountSatang,
+          categoryCode: row.categoryCode,
           paymentMethod: validated.value.paymentMethod,
-          kind,
-          installmentNumber,
-          payerEmail: identity.email,
-          transactionId,
+          comment,
+          email: identity.email,
+          apRowId: rowId,
         });
-        return json(201, { paymentId, transactionId });
-      } catch (err) {
-        // The ledger transaction posted but the local payment row didn't —
-        // spec §5 "Ordering": never leave a ledger entry the register does
-        // not know about, so compensate by deleting what was just created.
-        console.error("[ap-store] payment insert failed after posting its ledger transaction - compensating delete", err);
-        await deleteExpenseTransaction(transactionId).catch((e) =>
-          console.error("[ap-store] compensating delete also failed", e),
-        );
-        return json(502, { error: "engine_unreachable" });
-      }
-    });
+        try {
+          const paymentId = apStore.addApPayment(rowId, {
+            date: validated.value.date,
+            amountSatang: validated.value.amountSatang,
+            paymentMethod: validated.value.paymentMethod,
+            kind,
+            installmentNumber,
+            payerEmail: identity.email,
+            transactionId,
+          });
+          return json(201, { paymentId, transactionId });
+        } catch (err) {
+          // H4a fix: the ledger transaction posted but the local payment row
+          // didn't — spec §5 "Ordering": never leave a ledger entry the
+          // register does not know about, so compensate by deleting what was
+          // just created. This is a LOCAL store failure, not the engine
+          // being unreachable (the engine call just above succeeded) — 500
+          // ap_store_error, not 502 engine_unreachable, so the clerk's retry
+          // affordance points at the right dependency instead of the
+          // duplicate-money path.
+          console.error("[ap-store] payment insert failed after posting its ledger transaction - compensating delete", err);
+          await deleteExpenseTransaction(transactionId).catch((e) =>
+            console.error("[ap-store] compensating delete also failed", e),
+          );
+          return json(500, { error: "ap_store_error" });
+        }
+      }),
+    );
   }
 
   const apPaymentDeleteMatch = path.match(/^\/ap\/rows\/([^/]+)\/payments\/([^/]+)$/);
   if (method === "DELETE" && apPaymentDeleteMatch) {
     const [, rowId, paymentId] = apPaymentDeleteMatch as unknown as [string, string, string];
 
-    let payment: ReturnType<typeof apStore.getApPayment>;
-    try {
-      payment = apStore.getApPayment(rowId, paymentId);
-    } catch (err) {
-      console.error("[ap-store]", err instanceof Error ? err.message : err);
-      return json(500, { error: "ap_store_error" });
-    }
-    if (!payment) return json(404, { error: "not found" });
+    return withApWriteLock(() =>
+      withEngine(async () => {
+        let payment: ReturnType<typeof apStore.getApPayment>;
+        try {
+          payment = apStore.getApPayment(rowId, paymentId);
+        } catch (err) {
+          console.error("[ap-store]", err instanceof Error ? err.message : err);
+          return json(500, { error: "ap_store_error" });
+        }
+        if (!payment) return json(404, { error: "not found" });
 
-    return withEngine(async () => {
-      // The AP register's own lock, mirroring currentMonthLockResponse
-      // exactly (spec §6 "Undo is per payment... the ledger's existing month
-      // lock is the only lock, so the two stores can never disagree") — the
-      // engine itself has no such rule; this app enforces it before ever
-      // calling deleteExpenseTransaction.
-      const date = await getExpenseTransactionDate(payment!.transactionId);
-      if (date.slice(0, 7) !== currentMonthBangkok()) {
-        return json(409, { error: "ledger_month_locked" });
-      }
-      await deleteExpenseTransaction(payment!.transactionId);
-      try {
-        apStore.deleteApPayment(rowId, paymentId);
-      } catch (err) {
-        // The ledger delete already succeeded; the local record is now
-        // stale (references a transaction that no longer exists) rather
-        // than lost — this is the one desync this route cannot compensate
-        // for automatically (unlike the create path, an engine delete
-        // cannot be "undone"). 500, not 502: the engine call itself
-        // succeeded, so engine_unreachable's retry affordance would mislead.
-        console.error("[ap-store] payment delete failed AFTER its ledger transaction was already deleted", err);
-        return json(500, { error: "ap_store_error" });
-      }
-      return new Response(null, { status: 204 });
-    });
+        // The AP register's own current-month lock, mirroring
+        // currentMonthLockResponse — the engine itself has no such rule,
+        // this app enforces it before ever calling deleteExpenseTransaction.
+        // H2b / L4 fix: a MISSING/already-deleted engine transaction during
+        // undo is treated as already-undone, not an error — the desired end
+        // state (no ledger row, no local payment) is already reached. This
+        // is the one case the two stores are deliberately allowed to already
+        // disagree about, precisely because it is benign and self-healing:
+        // it covers both a genuinely dangling local payment (a previous
+        // undo's compensating step failed after the engine delete already
+        // succeeded) and L4's double-undo race (two undo requests for the
+        // same payment — serialized by the write lock above, so the SECOND
+        // one to run sees the payment already gone locally and 404s before
+        // ever reaching the engine; this branch instead covers the engine
+        // side independently disagreeing, e.g. a manual delete via
+        // ezBookkeeping's own UI).
+        let alreadyGone = false;
+        try {
+          const date = await getExpenseTransactionDate(payment.transactionId);
+          if (date.slice(0, 7) !== currentMonthBangkok()) {
+            return json(409, { error: "ledger_month_locked" });
+          }
+        } catch (err) {
+          if (!(err instanceof EngineTransactionNotFoundError)) throw err;
+          alreadyGone = true;
+        }
+
+        if (!alreadyGone) {
+          try {
+            await deleteExpenseTransaction(payment.transactionId);
+          } catch (err) {
+            if (!(err instanceof EngineTransactionNotFoundError)) throw err;
+          }
+        }
+
+        try {
+          apStore.deleteApPayment(rowId, paymentId);
+        } catch (err) {
+          // The ledger delete already succeeded (or was already a no-op);
+          // the local record is now stale rather than lost — this is a
+          // genuine local-store failure, not the engine being unreachable
+          // (the engine side is already resolved either way by this point).
+          console.error("[ap-store] payment delete failed AFTER its ledger transaction was already deleted/gone", err);
+          return json(500, { error: "ap_store_error" });
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
   }
 
   return json(404, { error: "not found" });

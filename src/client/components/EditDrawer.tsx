@@ -9,6 +9,7 @@ import type { ExpensePhoto, ExpenseTransaction, PaymentMethod } from "../../shar
 import {
   AMOUNT_ARIA_LABEL,
   AMOUNT_PLACEHOLDER,
+  AP_MANAGED,
   EDIT_DRAWER,
   ENGINE_ERROR,
   FIELD_LABELS,
@@ -61,6 +62,10 @@ export function EditDrawer({ item, recentCodes, onClose, onSaved, onDeleted }: P
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [engineError, setEngineError] = useState(false);
+  // H2 fix: distinct from engineError — the server 409s { error: "ap_managed" }
+  // when this entry is actually an AP register payment transaction, which
+  // must only be edited/deleted from the ค้างจ่าย tab.
+  const [apManagedError, setApManagedError] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
 
@@ -106,6 +111,7 @@ export function EditDrawer({ item, recentCodes, onClose, onSaved, onDeleted }: P
     }
     setErrors({});
     setEngineError(false);
+    setApManagedError(false);
     setSaving(true);
     try {
       await updateExpense(item.id, {
@@ -119,6 +125,7 @@ export function EditDrawer({ item, recentCodes, onClose, onSaved, onDeleted }: P
     } catch (err) {
       if (err instanceof SessionExpiredError) return;
       if (err instanceof EngineUnreachableError) setEngineError(true);
+      else if (err instanceof Error && err.message === "ap_managed") setApManagedError(true);
       else setEngineError(true);
     } finally {
       setSaving(false);
@@ -133,7 +140,14 @@ export function EditDrawer({ item, recentCodes, onClose, onSaved, onDeleted }: P
       await deleteExpense(item.id);
       onDeleted(item.id);
     } catch (err) {
-      if (!(err instanceof SessionExpiredError)) {
+      if (err instanceof SessionExpiredError) {
+        // handled by the session-expired overlay elsewhere
+      } else if (err instanceof Error && err.message === "ap_managed") {
+        // H2 fix: this entry is an AP register payment transaction —
+        // distinct message pointing the clerk at the ค้างจ่าย tab, never the
+        // generic fallback below.
+        window.alert(AP_MANAGED.message);
+      } else {
         window.alert(err instanceof Error ? err.message : "ลบรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
       }
     } finally {
@@ -352,7 +366,8 @@ export function EditDrawer({ item, recentCodes, onClose, onSaved, onDeleted }: P
             <span />
           )}
           <div className="flex items-center gap-2">
-            {engineError && (
+            {apManagedError && <span className="text-xs text-bad">{AP_MANAGED.message}</span>}
+            {engineError && !apManagedError && (
               <span className="text-xs text-bad">{ENGINE_ERROR.message}</span>
             )}
             <button

@@ -45,9 +45,21 @@ interface FieldErrors {
   creditor?: string;
   item?: string;
   amount?: string;
+  vat?: string;
+  wht?: string;
+  discount?: string;
   category?: string;
   outstanding?: string;
 }
+
+/** L6 fix: date range for กำหนดชำระ's native date input — the paper workbook
+ * this register replaces genuinely contains a "1969" typo, almost certainly
+ * a misclicked date-picker year spinner. Deliberately generous (unlike
+ * ordinary expense dates, กำหนดชำระ is unbounded — past dates are the norm),
+ * this only rules out a wildly wrong year; the server enforces the same
+ * range authoritatively (src/server/server.ts's validateApRowInput). */
+const DUE_DATE_MIN = "2000-01-01";
+const DUE_DATE_MAX = "2100-12-31";
 
 function paymentKindLabel(p: ApPayment): string {
   if (p.kind === "deposit") return AP_FIELDS.deposit;
@@ -143,6 +155,15 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     const parsedAmount = parseAmountToSatang(amountText);
     if (amountText.trim() === "") next.amount = VALIDATION.amountRequired;
     else if (parsedAmount === null || parsedAmount <= 0) next.amount = VALIDATION.amountInvalid;
+
+    // M2 fix: an unparseable VAT/WHT/discount is a validation error shown to
+    // the clerk, never silently treated as 0 (which used to let a typo like
+    // "12.345" or "abc" quietly zero out a real tax/discount figure with no
+    // feedback at all — these fields are optional, so an EMPTY field is
+    // still fine and means "not entered").
+    if (vatText.trim() !== "" && parseAmountToSatang(vatText) === null) next.vat = VALIDATION.amountInvalid;
+    if (whtText.trim() !== "" && parseAmountToSatang(whtText) === null) next.wht = VALIDATION.amountInvalid;
+    if (discountText.trim() !== "" && parseAmountToSatang(discountText) === null) next.discount = VALIDATION.amountInvalid;
 
     if (!categoryCode) next.category = VALIDATION.categoryRequired;
 
@@ -320,6 +341,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                   className="h-10 w-full rounded-md border border-line-strong bg-panel pl-7 pr-3 text-right text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
                 />
               </div>
+              {errors.vat && <p className="mt-1 text-xs text-bad">{errors.vat}</p>}
             </div>
 
             <div>
@@ -337,6 +359,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                   className="h-10 w-full rounded-md border border-line-strong bg-panel pl-7 pr-3 text-right text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
                 />
               </div>
+              {errors.wht && <p className="mt-1 text-xs text-bad">{errors.wht}</p>}
             </div>
 
             <div>
@@ -405,6 +428,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                   className="h-10 w-full rounded-md border border-line-strong bg-panel pl-7 pr-3 text-right text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
                 />
               </div>
+              {errors.discount && <p className="mt-1 text-xs text-bad">{errors.discount}</p>}
             </div>
 
             <div>
@@ -426,6 +450,8 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                   key={dueDate}
                   type="date"
                   defaultValue={dueDate}
+                  min={DUE_DATE_MIN}
+                  max={DUE_DATE_MAX}
                   className="rounded-md border border-line-strong px-2 py-1.5 text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
                 />
                 {dueDate && <span className="text-sm font-semibold text-ink">{isoToThaiLong(dueDate)}</span>}
