@@ -14,6 +14,7 @@ CLAUDE.md's public-repo hygiene rule (no LAN IPs, no internal topology).
 | Frontend container | `expense-ledger` (internal `:3000`) |
 | Engine container | `expense-ledger-engine` (internal `:8080`) |
 | Volume | `expense_data:/ezbookkeeping/data` (engine's SQLite + storage) |
+| Volume | `expense_ap:/app/data` (frontend's AP register sqlite only — see CLAUDE.md "AP register storage exception") |
 | Frontend image | `ghcr.io/thehfhotel/expense-ledger` (+`:buildcache`) |
 | Engine image | `ghcr.io/thehfhotel/ezbookkeeping` (our GHCR mirror of upstream, pinned by digest) |
 | Engine source fork | `github.com/thehfhotel/ezbookkeeping` (insurance only — see "Upgrade procedure") |
@@ -26,7 +27,9 @@ bun run dev          # Bun --hot on http://localhost:3000
 bun run build         # scripts/build.ts -> dist/client
 bun run start          # NODE_ENV=production bun src/server/server.ts
 bun run typecheck      # tsc --noEmit
-bun test               # bun:sqlite-free — server.test.ts drives fetchHandler directly
+bun test               # server.test.ts drives fetchHandler directly; the AP register's
+                       # apStore.test.ts/server.test.ts AP suites use bun:sqlite against
+                       # temp files (AP_DB_PATH), never the real /app/data/ap.db path
 ```
 
 CI (`.github/workflows/ci.yml`) runs typecheck, `bun test`, then build, on every
@@ -199,6 +202,15 @@ in docker-compose.yml, all uploaded receipt photos under
 `/ezbookkeeping/data/storage` — everything the engine owns lives under that
 one mount, so one volume backup covers both the ledger and every receipt
 image.
+
+The AP register ("ค้างจ่าย" tab) has its own SEPARATE nightly `tar` of the
+`expense_ap` Docker volume (`/app/data/ap.db`, the frontend container's own
+bun:sqlite database — see CLAUDE.md's "AP register storage exception"). This
+is intentionally a second, independent backup line: `expense_ap` lives on the
+frontend container, not the engine, and holds creditor/due-date/payment-
+history bookkeeping that has no ezBookkeeping equivalent — losing it would
+lose the register even though every posted payment is still separately
+recoverable from the engine's own transaction history.
 
 ## ezBookkeeping API notes (dev reference)
 

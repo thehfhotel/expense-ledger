@@ -13,6 +13,14 @@ services:
       - ENGINE_API_TOKEN=${ENGINE_API_TOKEN:-}
       - ACCESS_TEAM_DOMAIN=${ACCESS_TEAM_DOMAIN:-laikaexpress.cloudflareaccess.com}
       - ACCESS_AUD=${ACCESS_AUD:-}
+      # AP register ("ค้างจ่าย") sqlite path — the ONE documented exception
+      # to "this repo's server never talks to a database of its own" (see
+      # CLAUDE.md). Lazy-opened on first /api/ap request; GET /healthz and
+      # boot never touch it. Backed by the expense_ap volume below, mounted
+      # at this same path, NOT the engine's expense_data volume.
+      - AP_DB_PATH=${AP_DB_PATH:-/app/data/ap.db}
+    volumes:
+      - expense_ap:/app/data
     depends_on:
       - engine
     networks:
@@ -114,6 +122,11 @@ services:
 volumes:
   expense_data:
     name: expense_data
+  # AP register ("ค้างจ่าย") bun:sqlite store — frontend-container-only,
+  # separate from expense_data (the engine's own volume). See CLAUDE.md's
+  # "AP register storage exception" note and src/server/apStore.ts.
+  expense_ap:
+    name: expense_ap
 
 networks:
   shared-nginx:
