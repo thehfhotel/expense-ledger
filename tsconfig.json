@@ -6,7 +6,8 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,
-    "lib": ["ESNext", "DOM"],
+    "jsx": "react-jsx",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["bun"],
     "resolveJsonModule": true,
     "esModuleInterop": true,
@@ -16,5 +17,5 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*", "scripts/**/*"]
+  "include": ["src/**/*", "scripts/**/*", "build.ts"]
 }

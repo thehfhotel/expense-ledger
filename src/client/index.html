@@ -1,39 +1,21 @@
 <!doctype html>
 <html lang="th">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>บัญชีรายจ่าย HF Hotel</title>
-<style>
-  body {
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: system-ui, -apple-system, "Noto Sans Thai", sans-serif;
-    background: #fafafa;
-    color: #222;
-  }
-  main {
-    text-align: center;
-    padding: 2rem;
-  }
-  h1 {
-    font-size: 1.25rem;
-    font-weight: 600;
-    margin: 0 0 0.5rem;
-  }
-  p {
-    margin: 0;
-    color: #666;
-  }
-</style>
-</head>
-<body>
-  <main>
-    <h1>บัญชีรายจ่าย HF Hotel</h1>
-    <p>ระบบกำลังอยู่ระหว่างการพัฒนา</p>
-  </main>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#4F0E0E" />
+    <title>บันทึกค่าใช้จ่าย</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap"
+    />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body class="bg-shell text-ink antialiased">
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+    <script defer src="https://erp.thehfhotel.org/shell/hf-bar.js" data-app="Expense Ledger" data-module="finance"></script>
+  </body>
 </html>

@@ -1,0 +1,5 @@
+# Tailwind v4 plugin for Bun's HTML bundler. Used by `bun run dev` (Bun.serve
+# with HTML routes). Production build uses build.ts and registers the
+# plugin inline via Bun.build({ plugins }).
+[serve.static]
+plugins = ["bun-plugin-tailwind"]

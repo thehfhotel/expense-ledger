@@ -6,10 +6,10 @@ FROM oven/bun:1.3-alpine AS build
 
 WORKDIR /app
 
-COPY package.json bun.lock* ./
+COPY package.json bun.lock* bunfig.toml ./
 RUN bun install --frozen-lockfile
 
-COPY tsconfig.json ./
+COPY tsconfig.json build.ts ./
 COPY src ./src
 COPY scripts ./scripts
 

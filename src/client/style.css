@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+/* HF One tokens — canonical values in ~/HF-erp/design/HF-ONE.md and
+   ~/HF-erp/public/shell/hf.css. Copied here per that contract (each estate
+   app carries its own local copy) — copied wholesale from income-ledger's
+   src/client/style.css, this app's sibling. Never use Tailwind's
+   slate/gray palette — burgundy/gold/stone only. */
+@theme {
+  --font-sans: "Sarabun", "Noto Sans Thai", ui-sans-serif, system-ui, sans-serif;
+
+  --color-brand-50: #fbeaea;
+  --color-brand-100: #f5c9c9;
+  --color-brand-200: #e9a3a3;
+  --color-brand-300: #c76060;
+  --color-brand-400: #a83030;
+  --color-brand-500: #8b0000;
+  --color-brand-600: #7a0000;
+  --color-brand-700: #6b1212;
+  --color-brand-800: #4f0e0e;
+  --color-brand-900: #3b0a0a;
+
+  --color-gold-50: #fbf6e9;
+  --color-gold-100: #f6eacb;
+  --color-gold-300: #e7c97f;
+  --color-gold-500: #d9a441;
+  --color-gold-600: #b98730;
+  --color-gold-700: #93691f;
+
+  --color-shell: #faf9f7;
+  --color-panel: #ffffff;
+  --color-tint: #f4f1ed;
+  --color-line: #e8e4df;
+  --color-line-strong: #cfc9c1;
+  --color-ink: #26221e;
+  --color-ink-muted: #7a7268;
+
+  --color-ok: #2f855a;
+  --color-warn: #b7791f;
+  --color-bad: #c53030;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-shell);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(217, 164, 65, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Hide scrollbars on the gold-pill nav rail without killing scroll — same
+   rail class income-ledger's nav uses. */
+.rail {
+  scrollbar-width: none;
+}
+.rail::-webkit-scrollbar {
+  display: none;
+}
