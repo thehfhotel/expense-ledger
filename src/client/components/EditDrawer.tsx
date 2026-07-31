@@ -205,6 +205,7 @@ export function EditDrawer({ item, recentCodes, onClose, onSaved, onDeleted }: P
                   key={date}
                   type="date"
                   defaultValue={date}
+                  min={`${currentMonthBangkok()}-01`}
                   max={todayBangkok()}
                   disabled={locked}
                   className="rounded-md border border-line-strong px-2 py-1.5 text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-tint disabled:text-ink-muted"

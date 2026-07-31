@@ -7,7 +7,6 @@
       "dependencies": {
         "react": "^19.2.0",
         "react-dom": "^19.2.0",
-        "xlsx": "^0.18.5",
       },
       "devDependencies": {
         "@tailwindcss/cli": "^4.1.16",
@@ -17,6 +16,7 @@
         "bun-plugin-tailwind": "^0.1.2",
         "tailwindcss": "^4.1.16",
         "typescript": "^5.9.3",
+        "xlsx": "^0.18.5",
       },
     },
   },

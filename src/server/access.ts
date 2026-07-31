@@ -7,16 +7,27 @@
 //   - else: verify the `cf-access-jwt-assertion` header (RS256, JWKS cached
 //     1h, iss/aud/exp/nbf).
 //
-// This is defense-in-depth, never the only gate: Cloudflare Access decides
-// who reaches the app's hostname at the edge before any request reaches this
-// process. identify() only resolves WHO the caller is (for provenance on
-// whatever writes the frontend ends up doing), never what they may do.
+// For requests that arrive over Cloudflare Access (the public hostname),
+// Cloudflare has already decided who reaches this process before the
+// request lands here, and this check is a second, redundant layer. BUT for
+// LAN-path requests — the frontend's docker-compose.yml host-port mapping
+// (HOST_PORT:3000) is reachable directly by any device already on the LAN,
+// which never touches Cloudflare at all — this check is the ONLY gate.
+// identify() only resolves WHO the caller is (for provenance on whatever
+// writes the frontend ends up doing), never what they may do; there is no
+// authorization decision here to fall back on if the identity check itself
+// is weak.
+//
+// Because of the LAN-path case above, ACCESS_AUD MUST be non-empty in
+// production: with it unset, verifyAccessJwt skips the aud check entirely,
+// so a valid Cloudflare Access JWT issued for ANY app under the team domain
+// (not just this one) would pass identify() here. issuer/signature/expiry
+// are still verified either way.
 //
 // Dormant-when-unset: with no `cf-access-jwt-assertion` header (e.g. a
 // direct request that never went through Access) identify() simply returns
-// null — callers decide whether that 401s. ACCESS_AUD unset skips the aud
-// check (issuer/signature/expiry are still verified); ACCESS_TEAM_DOMAIN
-// falls back to the estate's default team domain either way.
+// null — callers decide whether that 401s. ACCESS_TEAM_DOMAIN falls back to
+// the estate's default team domain regardless of ACCESS_AUD.
 
 export interface Identity {
   email: string;

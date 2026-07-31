@@ -168,13 +168,28 @@ export interface BuildEngineTransactionInput {
   dateIso: string;
   now?: Date;
   pictureIds?: string[];
+  /** Tag ids to resend on a full-overwrite modify.json (H2 fix). This app's
+   * client never builds tags itself (v1 sends none on CREATE — frontend
+   * spec's "NOT built" list, so this defaults to empty there), but
+   * scripts/import-workbook.ts tags every imported row with
+   * `import:<YYYY-MM>` for its own idempotency (re-import safety). Since
+   * modify.json is a full overwrite, a caller that fetches an EXISTING
+   * transaction (any edit, or a photo attach/detach) MUST pass that
+   * transaction's current tagIds back through here or the import tag is
+   * silently wiped — see engine.ts's modifyExpenseTransaction /
+   * attachExpensePhoto / detachExpensePhoto, which mirror exactly this
+   * fetch-then-resend pattern already used for pictureIds. */
+  tagIds?: string[];
 }
 
 /** Builds the full request body for both transactions/add.json and
  * transactions/modify.json (the latter needs every field resent — see the
- * file-level note on full-overwrite semantics). Never sends tags (v1 sends
- * none — frontend spec's "NOT built" list) or a destination account (this
- * app only ever writes plain expenses, never transfers). */
+ * file-level note on full-overwrite semantics). Never invents a destination
+ * account (this app only ever writes plain expenses, never transfers).
+ * `tagIds` defaults to empty (a newly created transaction has none), but
+ * see BuildEngineTransactionInput's doc comment: any caller resending an
+ * EXISTING transaction must pass its current tagIds through, or a
+ * full-overwrite modify silently strips them (H2 fix). */
 export function buildEngineTransactionPayload(input: BuildEngineTransactionInput): EngineTransactionPayload {
   return {
     type: TRANSACTION_TYPE_EXPENSE,
@@ -185,7 +200,7 @@ export function buildEngineTransactionPayload(input: BuildEngineTransactionInput
     sourceAmount: input.amountSatang,
     comment: input.comment,
     pictureIds: input.pictureIds ?? [],
-    tagIds: [],
+    tagIds: input.tagIds ?? [],
     hideAmount: false,
   };
 }

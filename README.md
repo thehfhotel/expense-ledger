@@ -80,8 +80,16 @@ EOF
 ## First-boot procedure
 
 The engine ships with no users and `EBK_USER_ENABLE_REGISTER=false` by
-default in production (see docker-compose.yml). To create the single ledger
-account:
+default in production (see docker-compose.yml). `EBK_SECURITY_ENABLE_API_TOKEN`
+also defaults to `true` there (upstream defaults `security.enable_api_token`
+to `false`, which rejects API-type tokens outright — `pkg/middlewares/
+authorization.go` — and the frontend's `src/server/engine.ts` sends exactly
+that kind of token on every call). To create the single ledger account:
+
+**Ordering matters**: `EBK_SECURITY_SECRET_KEY` must already be its FINAL
+production value (see "Gotchas" below) before step 3 mints a token — rotating
+the secret key invalidates every previously issued token, so a token minted
+before the key is finalized stops working the moment the key changes.
 
 1. On evergreen, temporarily flip registration on and restart just the
    engine: `EBK_USER_ENABLE_REGISTER=true docker compose up -d engine` (or
@@ -90,9 +98,12 @@ account:
 2. Reach the engine over the loopback host-port mapping (`127.0.0.1:4051`) —
    e.g. an SSH tunnel from your laptop — and register the one account through
    ezBookkeeping's own UI.
-3. Sign in, then **Settings > API token** and mint a token. That value is
-   `ENGINE_API_TOKEN` — set it as a GitHub secret and redeploy so the
-   frontend's `src/server/engine.ts` client can use it.
+3. Sign in, then **Settings > API token** and mint a token as
+   **non-expiring** (`expiresInSeconds=0` — pick "never expires" if the UI
+   offers an expiry choice; an expiring token silently breaks the frontend's
+   engine client the moment it lapses, surfacing as `engine_unreachable`).
+   That value is `ENGINE_API_TOKEN` — set it as a GitHub secret and redeploy
+   so the frontend's `src/server/engine.ts` client can use it.
 4. Set `EBK_USER_ENABLE_REGISTER` back to `false` (the compose default) and
    redeploy, so the registration page can never create a second account.
 
@@ -264,6 +275,12 @@ Full HTTP API reference: <https://ezbookkeeping.mayswind.net/httpapi/>.
   engine boots fine either way, but that default is insecure for anything
   holding real financial data. Always set it once the ledger has real
   content.
+- `security.enable_api_token` (`EBK_SECURITY_ENABLE_API_TOKEN`) defaults to
+  `false` upstream, which makes `pkg/middlewares/authorization.go` reject
+  API-type tokens outright — the exact kind `src/server/engine.ts` sends as
+  a Bearer credential on every call. docker-compose.yml and deploy.yml both
+  default this to `true`; don't unset it or the frontend's engine client
+  fails every request even with a valid, non-expired `ENGINE_API_TOKEN`.
 - **Fresh-volume first boot crash-loops the engine** unless
   `docker-compose.yml`'s `engine-init` one-shot service runs first. Upstream's
   `docker/docker-entrypoint.sh` (verified at tag `v1.6.1`) execs the server

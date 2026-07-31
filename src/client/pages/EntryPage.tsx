@@ -274,6 +274,7 @@ export function EntryPage({ initialCategoryCode }: Props) {
               key={date}
               type="date"
               defaultValue={date}
+              min={`${currentMonthBangkok()}-01`}
               max={todayBangkok()}
               className="rounded-md border border-line-strong px-2 py-1.5 text-sm tabular-nums text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
             />

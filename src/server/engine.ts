@@ -274,12 +274,27 @@ interface EngineTransactionRaw {
   comment: string;
   pictureIds?: (number | string)[];
   pictures?: { pictureId?: number | string; id?: number | string; originalUrl?: string; url?: string }[];
+  /** scripts/import-workbook.ts tags every imported row with
+   * `import:<YYYY-MM>` (see transactionBuilder.ts's BuildEngineTransactionInput
+   * doc comment). Optional/defensive like pictureIds above since the exact
+   * get.json response shape for a transaction with no tags was not
+   * independently re-verified from source. */
+  tagIds?: (number | string)[];
 }
 
 function extractPictureIds(raw: EngineTransactionRaw): string[] {
   if (Array.isArray(raw.pictureIds)) return raw.pictureIds.map(String);
   if (Array.isArray(raw.pictures)) return raw.pictures.map((p) => String(p.pictureId ?? p.id));
   return [];
+}
+
+/** H2 fix: modify.json is a full overwrite, so any single-field edit or
+ * photo attach/detach that doesn't resend the transaction's EXISTING tagIds
+ * silently wipes them — including scripts/import-workbook.ts's
+ * `import:<YYYY-MM>` idempotency tag, which would then double-count that
+ * row on a later `--force` re-import. Mirrors extractPictureIds above. */
+function extractTagIds(raw: EngineTransactionRaw): string[] {
+  return Array.isArray(raw.tagIds) ? raw.tagIds.map(String) : [];
 }
 
 function extractPhotos(raw: EngineTransactionRaw): ExpensePhoto[] {
@@ -366,9 +381,9 @@ export async function createExpenseTransaction(input: ExpenseInput, email: strin
 
 /** POST /api/v1/transactions/modify.json — a FULL overwrite (verified from
  * source, see transactionBuilder.ts): fetches the existing row first so
- * fields this call doesn't touch (pictureIds) are resent unchanged, per
- * rule 6 re-appends attribution with the CURRENT editor regardless of who
- * wrote it before. */
+ * fields this call doesn't touch (pictureIds, tagIds — H2 fix) are resent
+ * unchanged, per rule 6 re-appends attribution with the CURRENT editor
+ * regardless of who wrote it before. */
 export async function modifyExpenseTransaction(id: string, input: ExpenseInput, email: string): Promise<void> {
   const [existing, categoryEngineId, sourceAccountEngineId] = await Promise.all([
     getEngineTransaction(id),
@@ -382,6 +397,7 @@ export async function modifyExpenseTransaction(id: string, input: ExpenseInput, 
     comment: appendAttribution(input.comment, email),
     dateIso: input.date,
     pictureIds: extractPictureIds(existing),
+    tagIds: extractTagIds(existing),
   });
   const res = await engineFetch(`/transactions/modify.json`, {
     method: "POST",
@@ -421,6 +437,7 @@ export async function attachExpensePhoto(
     comment: existing.comment,
     dateIso: deriveDateFromEngineTime(existing.time),
     pictureIds,
+    tagIds: extractTagIds(existing),
   });
   const res = await engineFetch("/transactions/modify.json", {
     method: "POST",
@@ -442,6 +459,7 @@ export async function detachExpensePhoto(id: string, photoId: string): Promise<v
     comment: existing.comment,
     dateIso: deriveDateFromEngineTime(existing.time),
     pictureIds,
+    tagIds: extractTagIds(existing),
   });
   const res = await engineFetch("/transactions/modify.json", {
     method: "POST",

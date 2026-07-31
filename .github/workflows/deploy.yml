@@ -118,9 +118,13 @@ jobs:
           set -euo pipefail
           # Runtime env shipped alongside compose; docker compose reads
           # ./.env on `up`. Written unconditionally (unlike a purely
-          # optional feature's secrets) because the app-side Access check is
-          # defense-in-depth, not optional, and the engine cannot run
-          # meaningfully without its secret key.
+          # optional feature's secrets): for LAN-path requests (a device
+          # already on the LAN reaching the frontend's host:port directly,
+          # never touching Cloudflare) the app's own Cf-Access-Jwt-Assertion
+          # check is the ONLY gate, not a defense-in-depth layer behind
+          # Cloudflare Access — so ACCESS_AUD must be non-empty in
+          # production, and the engine cannot run meaningfully without its
+          # secret key either.
           {
             printf 'IMAGE_TAG=%s\n' "$IMAGE_TAG"
             printf 'HOST_PORT=%s\n' "4050"
@@ -136,6 +140,11 @@ jobs:
             # "Gotchas" — so this should always be set once the engine has
             # real user data.
             printf 'EBK_SECURITY_SECRET_KEY=%s\n' "${EBK_SECURITY_SECRET_KEY:-}"
+            # Enables API-token auth on the engine (security.enable_api_token
+            # upstream, off by default) — a literal "true", not a secret, so
+            # no env: indirection above. See docker-compose.yml and README
+            # "First-boot procedure".
+            printf 'EBK_SECURITY_ENABLE_API_TOKEN=%s\n' "true"
             # Registration stays OFF by default in production; flip to true
             # by hand on the host only for the first-boot account-creation
             # window, then back to false. Never leave it true unattended.

@@ -154,7 +154,7 @@ describe("buildEngineTransactionPayload", () => {
     expect(payload.sourceAccountId).toBe("2");
   });
 
-  test("never sends tags (v1 sends none) and defaults pictureIds to an empty array", () => {
+  test("defaults tagIds and pictureIds to an empty array (a new transaction has neither)", () => {
     const payload = buildEngineTransactionPayload({
       amountSatang: 100,
       categoryEngineId: "1",
@@ -178,5 +178,18 @@ describe("buildEngineTransactionPayload", () => {
       pictureIds: ["55", "56"],
     });
     expect(payload.pictureIds).toEqual(["55", "56"]);
+  });
+
+  test("passes through explicit tagIds when given (H2 fix — a full-overwrite modify must resend existing tags)", () => {
+    const payload = buildEngineTransactionPayload({
+      amountSatang: 100,
+      categoryEngineId: "1",
+      sourceAccountEngineId: "1",
+      comment: "x",
+      dateIso: "2026-07-15",
+      now,
+      tagIds: ["99"],
+    });
+    expect(payload.tagIds).toEqual(["99"]);
   });
 });

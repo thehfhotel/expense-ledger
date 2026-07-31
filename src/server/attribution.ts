@@ -57,6 +57,28 @@ export function appendAttribution(clerkText: string, email: string): string {
   return cleaned === "" ? token : `${cleaned}\n${token}`;
 }
 
+/** ezBookkeeping's transaction comment column caps at 255 runes upstream —
+ * a FINAL stored comment (clerk text plus the appended attribution token)
+ * over that limit gets a 400 from the engine itself. Runes here means JS
+ * UTF-16 code units, which is exact for this app's content: Thai script and
+ * hf email addresses both stay in the Basic Multilingual Plane (no
+ * surrogate pairs), and this repo carries no emojis (see CLAUDE.md). */
+export const ENGINE_COMMENT_MAX_RUNES = 255;
+
+/** The length the FINAL stored comment would occupy once attribution is
+ * appended — the exact same composition appendAttribution performs (M2
+ * fix), without allocating the string, so the server can budget the
+ * clerk-facing bound (COMMENT_MAX_LEN, a fixed guess) against the ACTUAL
+ * caller email length at request time before ever calling the engine. A
+ * long clerk comment paired with a long (e.g. LINE-synthetic) email can
+ * exceed ENGINE_COMMENT_MAX_RUNES even while comfortably under
+ * COMMENT_MAX_LEN alone. */
+export function attributedCommentLength(clerkText: string, email: string): number {
+  const cleaned = stripForgedAttributionLines(clerkText);
+  const token = `[hf:by=${email}]`;
+  return cleaned === "" ? token.length : cleaned.length + 1 + token.length;
+}
+
 export interface ParsedAttribution {
   /** Display text with the token stripped — what the client edits. */
   display: string;

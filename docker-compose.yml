@@ -76,6 +76,13 @@ services:
     environment:
       - TZ=${TZ:-Asia/Bangkok}
       - EBK_SECURITY_SECRET_KEY=${EBK_SECURITY_SECRET_KEY:-}
+      # Upstream defaults security.enable_api_token to false, which rejects
+      # API-type tokens outright (pkg/middlewares/authorization.go) — the
+      # frontend's src/server/engine.ts sends exactly that kind of token on
+      # every call, so this must be true. A literal flag, not a secret; see
+      # README "First-boot procedure" for the token-minting order (secret
+      # key finalized FIRST, token minted after).
+      - EBK_SECURITY_ENABLE_API_TOKEN=${EBK_SECURITY_ENABLE_API_TOKEN:-true}
       - EBK_USER_ENABLE_REGISTER=${EBK_USER_ENABLE_REGISTER:-false}
       # Redirects the engine's local-filesystem picture/avatar storage
       # (default: a directory relative to /ezbookkeeping, NOT under

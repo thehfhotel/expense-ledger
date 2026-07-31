@@ -5,7 +5,9 @@
 // dev-mode bypass without a real Cloudflare Access JWT.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { fetchHandler } from "./server.ts";
+import { buildMonthResponse, fetchHandler } from "./server.ts";
+import { todayBangkok } from "../shared/date.ts";
+import type { ExpenseTransaction } from "../shared/types.ts";
 
 function resetAuthEnv() {
   delete process.env.DEV_USER;
@@ -17,6 +19,22 @@ function devRequest(path: string, init?: RequestInit): Request {
   process.env.NODE_ENV = "development";
   process.env.DEV_USER = "tester@thehfhotel.org";
   return new Request(`http://localhost${path}`, init);
+}
+
+/** Same as devRequest but with a caller-chosen identity email — used by the
+ * M2 comment-budget tests, which need a long email to trigger the engine's
+ * 255-rune comment cap. */
+function devRequestAs(email: string, path: string, init?: RequestInit): Request {
+  process.env.NODE_ENV = "development";
+  process.env.DEV_USER = email;
+  return new Request(`http://localhost${path}`, init);
+}
+
+/** A date guaranteed to fall in a DIFFERENT (earlier) calendar month than
+ * whenever this test runs — 40 days back always crosses at least one month
+ * boundary, since no month is longer than 31 days. Used by the H4 tests. */
+function pastMonthDate(): string {
+  return new Date(Date.now() - 1000 * 60 * 60 * 24 * 40).toISOString().slice(0, 10);
 }
 
 describe("GET /healthz", () => {
@@ -159,10 +177,29 @@ describe("POST /api/expenses validation", () => {
 
   test("a valid body passes validation and reaches the (dormant) engine, surfacing 502", async () => {
     const res = await fetchHandler(
-      post({ date: "2026-07-01", amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "ok" }),
+      post({ date: todayBangkok(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "ok" }),
     );
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({ error: "engine_unreachable" });
+  });
+});
+
+describe("current-month lock on create (H4 fix — create had no month check at all)", () => {
+  afterEach(resetAuthEnv);
+
+  function post(body: unknown) {
+    return devRequest("/api/expenses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("400s when creating an entry dated in a closed past month", async () => {
+    const res = await fetchHandler(
+      post({ date: pastMonthDate(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
+    );
+    expect(res.status).toBe(400);
   });
 });
 
@@ -174,10 +211,21 @@ describe("current-month lock on edit/delete/photo routes", () => {
       devRequest("/api/expenses/123", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ date: "2026-07-01", amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
+        body: JSON.stringify({ date: todayBangkok(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
       }),
     );
     expect(res.status).toBe(502);
+  });
+
+  test("400s when patching an entry to move its date into a closed past month (H4 fix)", async () => {
+    const res = await fetchHandler(
+      devRequest("/api/expenses/123", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ date: pastMonthDate(), amountSatang: 100, categoryCode: "other", paymentMethod: "cash", comment: "" }),
+      }),
+    );
+    expect(res.status).toBe(400);
   });
 
   test("DELETE /api/expenses/:id surfaces 502 when the engine is dormant", async () => {
@@ -187,6 +235,103 @@ describe("current-month lock on edit/delete/photo routes", () => {
 
   test("POST /api/expenses/:id/photo surfaces 502 when the engine is dormant, before parsing multipart", async () => {
     const res = await fetchHandler(devRequest("/api/expenses/123/photo", { method: "POST" }));
+    expect(res.status).toBe(502);
+  });
+});
+
+describe("buildMonthResponse item sort — BigInt-safe id comparison (M1 fix)", () => {
+  function makeItem(id: string, overrides: Partial<ExpenseTransaction> = {}): ExpenseTransaction {
+    return {
+      id,
+      date: "2026-07-15",
+      amountSatang: 100,
+      categoryCode: "other",
+      paymentMethod: "cash",
+      comment: "",
+      by: null,
+      photos: [],
+      ...overrides,
+    };
+  }
+
+  test("orders two same-date ids that differ by 1 at 19 digits correctly", () => {
+    const lower = makeItem("3800000000000000001");
+    const higher = makeItem("3800000000000000002");
+    // Sanity check the precision-loss premise this fix guards against:
+    // Number() collapses both of these ids to the identical float, which is
+    // exactly why `Number(b.id) - Number(a.id)` used to compare them equal.
+    expect(Number(lower.id)).toBe(Number(higher.id));
+
+    const { items } = buildMonthResponse([lower, higher]);
+    expect(items.map((i) => i.id)).toEqual(["3800000000000000002", "3800000000000000001"]);
+  });
+
+  test("still sorts by date desc first, id desc only within the same date", () => {
+    const earlierDate = makeItem("2", { date: "2026-07-01" });
+    const laterDate = makeItem("1", { date: "2026-07-20" });
+    const { items } = buildMonthResponse([earlierDate, laterDate]);
+    expect(items.map((i) => i.id)).toEqual(["1", "2"]);
+  });
+});
+
+describe("comment length budget including attribution (M2 fix)", () => {
+  afterEach(resetAuthEnv);
+
+  // total stored length = comment.length + 1 (LF) + "[hf:by=" (7) + email.length + "]" (1)
+  // = comment.length + email.length + 9. With a 200-char comment, any email
+  // over 46 chars pushes the total past the engine's 255-rune cap.
+  const longEmail = `${"a".repeat(50)}@thehfhotel.org`;
+
+  test("400s with an error distinct from engine_unreachable when clerk text + attribution would exceed the engine's 255-rune cap", async () => {
+    const res = await fetchHandler(
+      devRequestAs(longEmail, "/api/expenses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          date: todayBangkok(),
+          amountSatang: 100,
+          categoryCode: "other",
+          paymentMethod: "cash",
+          comment: "x".repeat(200),
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).not.toBe("engine_unreachable");
+  });
+
+  test("enforces the same budget on PATCH, not just create", async () => {
+    const res = await fetchHandler(
+      devRequestAs(longEmail, "/api/expenses/123", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          date: todayBangkok(),
+          amountSatang: 100,
+          categoryCode: "other",
+          paymentMethod: "cash",
+          comment: "x".repeat(200),
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("a shorter comment with the same long email fits under the engine cap and reaches the (dormant) engine", async () => {
+    const res = await fetchHandler(
+      devRequestAs(longEmail, "/api/expenses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          date: todayBangkok(),
+          amountSatang: 100,
+          categoryCode: "other",
+          paymentMethod: "cash",
+          comment: "ok",
+        }),
+      }),
+    );
     expect(res.status).toBe(502);
   });
 });

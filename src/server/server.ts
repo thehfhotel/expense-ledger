@@ -10,6 +10,7 @@ import {
   getMonthExpenseTransactions,
   modifyExpenseTransaction,
 } from "./engine.ts";
+import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution.ts";
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
 import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "../shared/date.ts";
 import { isPaymentMethod } from "../shared/types.ts";
@@ -52,8 +53,12 @@ function json(status: number, body: unknown): Response {
 
 // ── /api routes ────────────────────────────────────────────────────────
 // Every route is gated by identify() (Cf-Access-Jwt-Assertion, verified
-// RS256 — src/server/access.ts). This is defense-in-depth, never the only
-// gate: Cloudflare Access decides who reaches this host at the edge.
+// RS256 — src/server/access.ts). For requests that arrive over Cloudflare
+// Access this is a second layer behind the edge decision, but for LAN-path
+// requests (this container's host-port mapping is reachable directly by
+// anything already on the LAN, bypassing Cloudflare entirely) it is the
+// ONLY gate — see access.ts's file-level note for why ACCESS_AUD must be
+// non-empty in production for this check to mean anything.
 //
 // The client's api() helper (src/client/api.ts) treats ANY 401/403 — or a
 // non-JSON content-type, which is what an expired Access session's login
@@ -95,6 +100,21 @@ async function currentMonthLockResponse(id: string): Promise<Response | null> {
   return null;
 }
 
+/** 400s a write whose FINAL stored comment (clerk text plus the appended
+ * `[hf:by=<email>]` attribution token — src/server/attribution.ts) would
+ * exceed the engine's 255-rune comment cap (M2 fix). The client-facing
+ * COMMENT_MAX_LEN (200) alone doesn't account for a long caller email (e.g.
+ * a LINE-synthetic address), so this budgets against the ACTUAL identity at
+ * request time rather than a fixed guess — distinct from and checked before
+ * the 502 engine_unreachable path, since retrying a request this shape
+ * would never succeed. */
+function commentBudgetResponse(comment: string, email: string): Response | null {
+  if (attributedCommentLength(comment, email) > ENGINE_COMMENT_MAX_RUNES) {
+    return json(400, { error: "comment too long with attribution" });
+  }
+  return null;
+}
+
 async function readJsonBody(req: Request): Promise<unknown> {
   try {
     return await req.json();
@@ -108,13 +128,22 @@ type ValidatedInput = { ok: true; value: ExpenseInput } | { ok: false; error: st
 /** Validates the body shared by POST /api/expenses and PATCH
  * /api/expenses/:id (frontend spec §9). `comment` is the clerk's raw text —
  * the server appends attribution separately (src/server/attribution.ts);
- * this function only bounds-checks it. */
+ * this function only bounds-checks it.
+ *
+ * H4 fix: the current-month check below applies to BOTH create and patch,
+ * since this function gates both routes — previously only an EXISTING
+ * transaction's date was checked (currentMonthLockResponse, PATCH/DELETE/
+ * photo routes only), so an entry could be created directly in a closed
+ * past month, or an edit could move an entry INTO one, with no check at
+ * all. The existing-date lock below is unchanged and still applies on top
+ * of this for edits. */
 function validateExpenseInput(body: unknown): ValidatedInput {
   if (typeof body !== "object" || body === null) return { ok: false, error: "invalid body" };
   const b = body as Record<string, unknown>;
 
   if (typeof b.date !== "string" || !isValidIso(b.date)) return { ok: false, error: "invalid date" };
   if (b.date > todayBangkok()) return { ok: false, error: "date must not be in the future" };
+  if (b.date.slice(0, 7) !== currentMonthBangkok()) return { ok: false, error: "date must be in the current month" };
 
   if (
     typeof b.amountSatang !== "number" ||
@@ -145,15 +174,31 @@ function validateExpenseInput(body: unknown): ValidatedInput {
   };
 }
 
+/** Compares two ezBookkeeping transaction ids (decimal-digit strings,
+ * ~3.8e18 — well above Number.MAX_SAFE_INTEGER) for a DESCENDING sort
+ * without going through `Number()`, which silently collapses distinct ids
+ * at that magnitude to the same float (M1 fix — two ids one apart at 19
+ * digits compare equal under `Number(b.id) - Number(a.id)`). Both ids are
+ * plain positive-integer strings with no leading zeros, so (length, then
+ * lexicographic) ordering is exact: more digits is always a larger number,
+ * and same-length numeric strings compare the same as their numeric value,
+ * digit by digit. */
+function compareIdsDescending(aId: string, bId: string): number {
+  if (aId.length !== bId.length) return bId.length - aId.length;
+  if (aId === bId) return 0;
+  return aId > bId ? -1 : 1;
+}
+
 /** Builds GET /api/expenses?month=YYYY-MM's response: per-category totals
  * and the grand total, computed here from the month's transactions (never
  * from the engine's own statistics endpoint — see README's dev notes on
  * why: this list already carries every field the totals need, verified,
  * where the statistics response shape was not). Sorted วันที่ desc then
  * insertion desc (frontend spec §3.3); ezBookkeeping ids are assigned by a
- * monotonic sequence, so numeric id desc is a reliable insertion-order
- * proxy within a day. */
-function buildMonthResponse(items: ExpenseTransaction[]): MonthExpensesResponse {
+ * monotonic sequence, so id desc is a reliable insertion-order proxy within
+ * a day. Exported so tests can drive it directly with hand-built
+ * transactions — see server.test.ts. */
+export function buildMonthResponse(items: ExpenseTransaction[]): MonthExpensesResponse {
   const totalsByCategory: Partial<Record<ExpenseCategoryCode, CategoryTotal>> = {};
   let totalSatang = 0;
   for (const item of items) {
@@ -169,7 +214,7 @@ function buildMonthResponse(items: ExpenseTransaction[]): MonthExpensesResponse 
 
   const sorted = [...items].sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? 1 : -1;
-    return Number(b.id) - Number(a.id);
+    return compareIdsDescending(a.id, b.id);
   });
 
   return { items: sorted, totalsByCategory, totalSatang };
@@ -203,6 +248,8 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
   if (method === "POST" && path === "/expenses") {
     const validated = validateExpenseInput(await readJsonBody(req));
     if (!validated.ok) return json(400, { error: validated.error });
+    const budgetError = commentBudgetResponse(validated.value.comment, identity.email);
+    if (budgetError) return budgetError;
     return withEngine(async () => {
       const id = await createExpenseTransaction(validated.value, identity.email);
       return json(201, { id });
@@ -216,6 +263,8 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     if (method === "PATCH") {
       const validated = validateExpenseInput(await readJsonBody(req));
       if (!validated.ok) return json(400, { error: validated.error });
+      const budgetError = commentBudgetResponse(validated.value.comment, identity.email);
+      if (budgetError) return budgetError;
       return withEngine(async () => {
         const locked = await currentMonthLockResponse(id);
         if (locked) return locked;

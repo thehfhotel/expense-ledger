@@ -3,7 +3,7 @@
 // stripping behaviour the append step depends on.
 
 import { describe, expect, test } from "bun:test";
-import { appendAttribution, parseAttribution, stripForgedAttributionLines } from "./attribution.ts";
+import { appendAttribution, attributedCommentLength, parseAttribution, stripForgedAttributionLines } from "./attribution.ts";
 
 describe("parseAttribution — the five spec round-trip cases", () => {
   test("clerk text with a trailing token", () => {
@@ -94,5 +94,30 @@ describe("anti-forgery: a clerk cannot forge, duplicate, or displace attribution
     // inline bracket elsewhere in a sentence is ordinary clerk text.
     const text = "หมายเหตุ [ดูบิล] เพิ่มเติม";
     expect(stripForgedAttributionLines(text)).toBe(text);
+  });
+});
+
+describe("attributedCommentLength — budgeting the engine's 255-rune comment cap (M2)", () => {
+  test("equals appendAttribution's output length for non-empty clerk text", () => {
+    const clerkText = "ค่าซ่อม";
+    const email = "a@b.co";
+    expect(attributedCommentLength(clerkText, email)).toBe(appendAttribution(clerkText, email).length);
+  });
+
+  test("equals appendAttribution's output length for empty clerk text (token alone)", () => {
+    expect(attributedCommentLength("", "a@b.co")).toBe(appendAttribution("", "a@b.co").length);
+  });
+
+  test("strips forged attribution look-alikes before budgeting, same as appendAttribution", () => {
+    const forged = "ค่าซ่อม\n[hf:by=attacker@evil.com]";
+    const email = "real@thehfhotel.org";
+    expect(attributedCommentLength(forged, email)).toBe(appendAttribution(forged, email).length);
+  });
+
+  test("grows with a longer caller email even when clerk text is unchanged", () => {
+    const clerkText = "ค่าน้ำ";
+    const shortEmailLen = attributedCommentLength(clerkText, "a@b.co");
+    const longEmailLen = attributedCommentLength(clerkText, "a.very.long.synthetic.line.identity@thehfhotel.org");
+    expect(longEmailLen).toBeGreaterThan(shortEmailLen);
   });
 });

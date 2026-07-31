@@ -2,7 +2,10 @@
 // not the server or browser's own local date (see todayBangkok()). Display
 // mirrors the paper sheet: Thai Buddhist Era (พ.ศ. = CE + 543). Ported
 // unchanged from income-ledger's src/shared/date.ts — see that repo's copy
-// for the canonical version; this file must never drift from it.
+// for the canonical version; this file must never drift from it EXCEPT for
+// isValidIso's impossible-date rejection below (a bug fix made here only —
+// income-ledger's copy still accepts impossible dates via regex-only
+// validation; port this fix over there too if this ever needs re-syncing).
 
 /** Today's business date as a Bangkok calendar string, regardless of the
  * server/browser's own timezone. This is THE definition of "today" for
@@ -86,8 +89,27 @@ export function shiftDays(iso: string, delta: number): string {
   return toIso(d);
 }
 
+/** Rejects not just the wrong SHAPE but any impossible calendar date — a
+ * regex-only check lets a day like 99 or a month like 00 through, and
+ * Date.UTC/the Date constructor silently ROLL such values over into a later
+ * (or earlier) real date (e.g. 2026-06-99 -> 2026-09-07), which defeats both
+ * the no-future-date rule and the current-month lock: a clerk can type an
+ * impossible date that lands the entry in a future or already-locked month.
+ * Constructing the date via Date.UTC and checking every component round-trips
+ * exactly catches this — an out-of-range day/month always changes at least
+ * one of year/month/day after normalization. */
 export function isValidIso(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const roundTripped = new Date(Date.UTC(year, month - 1, day));
+  return (
+    roundTripped.getUTCFullYear() === year &&
+    roundTripped.getUTCMonth() === month - 1 &&
+    roundTripped.getUTCDate() === day
+  );
 }
 
 export function isValidMonth(s: string): boolean {
