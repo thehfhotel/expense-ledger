@@ -306,15 +306,21 @@ function normalizeOptionalApAmount(v: unknown): number | null | typeof AP_OPTION
   return v;
 }
 
-type ValidatedApRowInput = { ok: true; value: ApRowInput } | { ok: false; error: string };
+export type ValidatedApRowInput = { ok: true; value: ApRowInput } | { ok: false; error: string };
 
 /** Validates the body shared by POST /api/ap/rows and PATCH
  * /api/ap/rows/:id (spec §4, §9) — field-shape validation only. The
  * negative-outstanding check (spec §4 "ยอดค้างชำระติดลบ") depends on
  * whether this is a create (no payments yet) or an edit (existing payments
  * matter), so the route handlers below compute that themselves via
- * computeGross/computeOutstanding after this passes. */
-function validateApRowInput(body: unknown): ValidatedApRowInput {
+ * computeGross/computeOutstanding after this passes.
+ *
+ * Exported so operator scripts that seed AP rows outside the HTTP path
+ * (scripts/seed-ap-2026-07.ts) can validate against the EXACT same rules a
+ * clerk's POST /api/ap/rows would run through, rather than re-implementing
+ * a parallel copy that could silently drift — a seeded row must be
+ * schema-indistinguishable from one a clerk typed in by hand. */
+export function validateApRowInput(body: unknown): ValidatedApRowInput {
   if (typeof body !== "object" || body === null) return { ok: false, error: "invalid body" };
   const b = body as Record<string, unknown>;
 
