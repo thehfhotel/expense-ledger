@@ -171,3 +171,19 @@ Full HTTP API reference: <https://ezbookkeeping.mayswind.net/httpapi/>.
   engine boots fine either way, but that default is insecure for anything
   holding real financial data. Always set it once the ledger has real
   content.
+- **Fresh-volume first boot crash-loops the engine** unless
+  `docker-compose.yml`'s `engine-init` one-shot service runs first. Upstream's
+  `docker/docker-entrypoint.sh` (verified at tag `v1.6.1`) execs the server
+  directly with no setup step, and its `Dockerfile` only pre-creates the
+  *default* `/ezbookkeeping/storage` at build time — it has no idea we've
+  redirected storage to `/ezbookkeeping/data/storage` via
+  `EBK_STORAGE_LOCAL_FILESYSTEM_PATH` (see the gotcha above). On a brand new
+  `expense_data` volume that directory doesn't exist, so the engine refuses
+  to boot with `cannot load configuration, because invalid local file
+  system storage path` and restarts forever. `engine-init` runs
+  `mkdir -p /ezbookkeeping/data/storage` against the same volume (using the
+  same pinned engine image, so its shell/user behavior needs no separate
+  verification) and `engine` only starts once it exits 0
+  (`depends_on: engine-init: condition: service_completed_successfully`).
+  It's a no-op on every later deploy since the directory already exists —
+  safe to leave in place permanently, not just for the first boot.

@@ -32,6 +32,29 @@ services:
         reservations:
           memory: 64M
 
+  # One-shot init: the upstream entrypoint (docker/docker-entrypoint.sh in
+  # thehfhotel/ezbookkeeping @ v1.6.1) execs the server directly with no
+  # mkdir step — its Dockerfile only pre-creates the *default*
+  # /ezbookkeeping/storage at build time. Since EBK_STORAGE_LOCAL_FILESYSTEM_PATH
+  # below redirects storage to /ezbookkeeping/data/storage (inside the
+  # volume, so receipt photos persist), a fresh expense_data volume has no
+  # `storage` subdir and the engine refuses to boot: "cannot load
+  # configuration, because invalid local file system storage path". This
+  # runs once per deploy (idempotent mkdir -p) to guarantee the directory
+  # exists before the engine starts. Uses the SAME pinned engine image
+  # (not a generic shell image) so its entrypoint/USER behavior is exactly
+  # what we've already verified via `docker inspect` on the host, rather
+  # than assumed.
+  engine-init:
+    image: ghcr.io/thehfhotel/ezbookkeeping@sha256:6d71a0d0f62806f609634886d0cbe9133e8177e1cb76b569d8dcc0587f734f0a
+    container_name: expense-ledger-engine-init
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /ezbookkeeping/data/storage"]
+    volumes:
+      - expense_data:/ezbookkeeping/data
+    networks:
+      - default
+
   engine:
     # Pinned by digest to our own GHCR mirror of upstream v1.6.1 (see
     # .github/workflows/mirror-engine.yml — `crane copy` preserves the
@@ -62,6 +85,9 @@ services:
       - EBK_STORAGE_LOCAL_FILESYSTEM_PATH=/ezbookkeeping/data/storage
     volumes:
       - expense_data:/ezbookkeeping/data
+    depends_on:
+      engine-init:
+        condition: service_completed_successfully
     networks:
       - default
     healthcheck:
