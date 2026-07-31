@@ -21,6 +21,7 @@
 // semantics, Unix-seconds time, satang-equivalent sourceAmount).
 
 import { EXPENSE_CATEGORIES, type ExpenseCategoryCode } from "../shared/categories.ts";
+import { apTagName } from "../shared/apTypes.ts";
 import type { ExpenseInput, ExpensePhoto, ExpenseTransaction, PaymentMethod } from "../shared/types.ts";
 import { appendAttribution, parseAttribution } from "./attribution.ts";
 import {
@@ -468,11 +469,100 @@ export async function detachExpensePhoto(id: string, photoId: string): Promise<v
   if (!res.success) throw new Error(res.errorMessage || "failed to remove photo");
 }
 
+// ── AP register: per-row tag + payment posting (orchestrator ruling #3) ────
+// Every payment recorded against an AP register row posts as an ordinary
+// expense transaction (same add.json call as createExpenseTransaction above)
+// PLUS a tag `ap:<rowId>` (see src/shared/apTypes.ts's apTagName), created on
+// demand the first time that row's first payment posts — mirrors
+// scripts/import-workbook.ts's `import:<YYYY-MM>` idempotency-tag pattern
+// (list first, create only on a miss, never assume a tag name is already
+// registered).
+
+interface EngineTag {
+  id: string;
+  name: string;
+}
+
+/** rowId -> engine tag id, in-process only (a fresh process re-resolves via
+ * the list call below — no different than the category/account caches). */
+let apTagCache = new Map<string, string>();
+
+async function getOrCreateApTag(rowId: string): Promise<string> {
+  const tagName = apTagName(rowId);
+  const cached = apTagCache.get(rowId);
+  if (cached) return cached;
+
+  const listRes = await engineFetch<EngineTag[]>("/transaction/tags/list.json");
+  if (!listRes.success || !listRes.result) {
+    throw new Error(listRes.errorMessage || "failed to list ezBookkeeping tags");
+  }
+  const existing = listRes.result.find((t) => t.name === tagName);
+  if (existing) {
+    apTagCache.set(rowId, existing.id);
+    return existing.id;
+  }
+
+  const addRes = await engineFetch<EngineTag>("/transaction/tags/add.json", {
+    method: "POST",
+    body: JSON.stringify({ name: tagName }),
+  });
+  if (!addRes.success || !addRes.result) {
+    throw new Error(addRes.errorMessage || "failed to create ezBookkeeping tag");
+  }
+  apTagCache.set(rowId, addRes.result.id);
+  return addRes.result.id;
+}
+
+export interface CreateApPaymentTransactionInput {
+  date: string;
+  amountSatang: number;
+  categoryCode: ExpenseCategoryCode;
+  paymentMethod: PaymentMethod;
+  /** Display text (already truncated to the attribution budget by the
+   * caller) — attribution is appended here, exactly like
+   * createExpenseTransaction, so this never happens twice. */
+  comment: string;
+  email: string;
+  apRowId: string;
+}
+
+/** Posts one AP payment as an ordinary expense transaction, tagged
+ * `ap:<rowId>` so every payment for a row can be found/audited from the
+ * engine's own UI, and undone exactly: the caller
+ * (src/server/server.ts) stores the returned id on the payment record, and
+ * DELETE .../payments/:pid deletes precisely that transaction via the
+ * existing deleteExpenseTransaction — never a re-derived one. Mirrors
+ * createExpenseTransaction exactly except for the extra tag. */
+export async function createApPaymentTransaction(input: CreateApPaymentTransactionInput): Promise<string> {
+  const [categoryEngineId, sourceAccountEngineId, tagId] = await Promise.all([
+    categoryCodeToEngineId(input.categoryCode),
+    paymentMethodToEngineId(input.paymentMethod),
+    getOrCreateApTag(input.apRowId),
+  ]);
+  const payload = buildEngineTransactionPayload({
+    amountSatang: input.amountSatang,
+    categoryEngineId,
+    sourceAccountEngineId,
+    comment: appendAttribution(input.comment, input.email),
+    dateIso: input.date,
+    tagIds: [tagId],
+  });
+  const res = await engineFetch<{ id?: number | string }>("/transactions/add.json", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (!res.success) throw new Error(res.errorMessage || "failed to create AP payment transaction");
+  const id = res.result?.id;
+  if (id === undefined || id === null) throw new Error("ezBookkeeping did not return a transaction id");
+  return String(id);
+}
+
 /** Test-only seam: lets server.test.ts reset the in-process category/account
  * caches between test files without reaching into module internals. */
 export const _internal = {
   resetCaches(): void {
     categoryCache = null;
     accountCache = null;
+    apTagCache = new Map();
   },
 };
