@@ -48,7 +48,6 @@ interface FieldErrors {
   vat?: string;
   wht?: string;
   discount?: string;
-  category?: string;
   outstanding?: string;
 }
 
@@ -165,7 +164,11 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     if (whtText.trim() !== "" && parseAmountToSatang(whtText) === null) next.wht = VALIDATION.amountInvalid;
     if (discountText.trim() !== "" && parseAmountToSatang(discountText) === null) next.discount = VALIDATION.amountInvalid;
 
-    if (!categoryCode) next.category = VALIDATION.categoryRequired;
+    // RULING 1 (2026-07): categoryCode is now OPTIONAL on the row itself —
+    // no requiredness check here any more. "ไม่ระบุหมวด" (categoryCode ===
+    // null) is a legitimate, explicitly-chosen final state, not a
+    // half-filled form. A payment against a null-category row still always
+    // requires one — see ApPaymentForm's own picker/validation.
 
     if (Object.keys(next).length === 0 && outstandingLive < 0) {
       next.outstanding = AP_VALIDATION.negativeOutstanding;
@@ -194,7 +197,7 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
       discountSatang: discountSatangLive,
       dueDate: dueDate.trim() === "" ? null : dueDate,
       entity: entity.trim(),
-      categoryCode: categoryCode!,
+      categoryCode,
       note,
     };
 
@@ -480,8 +483,27 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
 
             <div>
               <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.category}</label>
+              {/* RULING 1: category is optional on the row — "ไม่ระบุหมวด"
+                  is an explicit, selectable state (not just leaving the
+                  picker untouched), so it renders as its own pill alongside
+                  the 21-leaf grid rather than inside CategoryPicker itself
+                  (that component stays required-only, unchanged, for the
+                  entry/edit screens that still mandate a real category). */}
+              <button
+                type="button"
+                role="radio"
+                aria-checked={categoryCode === null}
+                onClick={() => setCategoryCode(null)}
+                className={
+                  "mb-2 rounded-full border px-2.5 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/40 " +
+                  (categoryCode === null
+                    ? "border-brand-500 bg-brand-50 text-brand-700"
+                    : "border-line-strong bg-panel text-ink-muted hover:bg-tint")
+                }
+              >
+                {AP_FIELDS.categoryUnset}
+              </button>
               <CategoryPicker value={categoryCode} onChange={setCategoryCode} recentCodes={recentCodes} />
-              {errors.category && <p className="mt-1 text-xs text-bad">{errors.category}</p>}
               <p className="mt-2 rounded-md bg-tint px-3 py-2 text-xs text-ink-muted">{AP_PAY.autoPostNotice}</p>
             </div>
 
@@ -540,9 +562,14 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
         <ApPaymentForm
           row={row}
           onClose={() => setShowPaymentForm(false)}
-          onPosted={(dateIso) => {
+          // RULING 1: the row's OWN categoryCode can be null at this point
+          // (that's exactly when ApPaymentForm renders its own picker) —
+          // `postedCategoryCode` is the one actually used to post (either
+          // the row's pre-existing category, or the one just collected),
+          // never the possibly-null `row.categoryCode` closed over here.
+          onPosted={(dateIso, postedCategoryCode) => {
             setShowPaymentForm(false);
-            setPostedNotice(AP_PAY.posted(categoryByCode(row.categoryCode).label, isoToBuddhist(dateIso)));
+            setPostedNotice(AP_PAY.posted(categoryByCode(postedCategoryCode).label, isoToBuddhist(dateIso)));
             onPaymentChanged();
             setTimeout(() => setPostedNotice(null), 4000);
           }}

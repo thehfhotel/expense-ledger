@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { createApPayment, EngineUnreachableError, SessionExpiredError } from "../api.ts";
 import { currentMonthBangkok, isoToThaiLong, todayBangkok } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
-import type { ApRow } from "../../shared/apTypes.ts";
+import { paymentNeedsCategoryPicker, type ApRow } from "../../shared/apTypes.ts";
+import type { ExpenseCategoryCode } from "../../shared/categories.ts";
 import type { PaymentMethod } from "../../shared/types.ts";
+import { CategoryPicker } from "./CategoryPicker.tsx";
 import {
   AP_FIELDS,
   AP_PAY,
@@ -14,16 +16,20 @@ import {
   PAYMENT_METHOD_LABELS,
   VALIDATION,
 } from "../labels.ts";
-import { loadPaymentMethod, savePaymentMethod } from "../storage.ts";
+import { loadPaymentMethod, loadRecentCategories, savePaymentMethod } from "../storage.ts";
 
 interface Props {
   row: ApRow;
   onClose: () => void;
-  /** `dateIso` is the date the payment actually posted on — the caller (the
-   * row list or ApRowDrawer) already knows the row's category, so it only
-   * needs the date back to compose spec §5's "ลงบัญชีในหมวด ... แล้ว"
-   * confirmation, or just to refetch/flash the row. */
-  onPosted: (dateIso: string) => void;
+  /** `dateIso` is the date the payment actually posted on. `categoryCode` is
+   * the category the payment ACTUALLY posted under — RULING 1 (2026-07):
+   * the row's own categoryCode can be null (that's exactly when this form
+   * renders its own picker), so this is never re-derived from `row` by the
+   * caller; it's always the row's pre-existing category, or the one this
+   * form just collected and had persisted onto the row. Callers use it to
+   * compose spec §5's "ลงบัญชีในหมวด ... แล้ว" confirmation, or ignore it and
+   * just refetch/flash the row. */
+  onPosted: (dateIso: string, categoryCode: ExpenseCategoryCode) => void;
 }
 
 /**
@@ -38,6 +44,15 @@ export function ApPaymentForm({ row, onClose, onPosted }: Props) {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(loadPaymentMethod());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // RULING 1 (2026-07): a row can carry no category yet, but every posted
+  // payment still must — this form collects one, right here, the FIRST time
+  // such a row is paid (same 21-leaf picker as the entry page). A row that
+  // already has a category never shows this at all — pre-ruling behavior,
+  // unchanged.
+  const needsCategoryPicker = paymentNeedsCategoryPicker(row.categoryCode);
+  const [pickedCategoryCode, setPickedCategoryCode] = useState<ExpenseCategoryCode | null>(null);
+  const recentCodes = useState(() => loadRecentCategories())[0];
 
   const dateInputRef = useRef<HTMLInputElement>(null);
   const amountInputRef = useRef<HTMLInputElement>(null);
@@ -76,13 +91,22 @@ export function ApPaymentForm({ row, onClose, onPosted }: Props) {
       amountInputRef.current?.focus();
       return;
     }
+    if (needsCategoryPicker && pickedCategoryCode === null) {
+      setError(AP_VALIDATION.categoryRequiredForPayment);
+      return;
+    }
 
     setError(null);
     setSubmitting(true);
     try {
-      await createApPayment(row.id, { date, amountSatang, paymentMethod });
+      await createApPayment(row.id, {
+        date,
+        amountSatang,
+        paymentMethod,
+        ...(needsCategoryPicker ? { categoryCode: pickedCategoryCode! } : {}),
+      });
       savePaymentMethod(paymentMethod);
-      onPosted(date);
+      onPosted(date, row.categoryCode ?? pickedCategoryCode!);
     } catch (err) {
       if (err instanceof SessionExpiredError) return;
       if (err instanceof EngineUnreachableError) {
@@ -91,6 +115,8 @@ export function ApPaymentForm({ row, onClose, onPosted }: Props) {
         setError(PAST_MONTH_LOCK);
       } else if (err instanceof Error && err.message === "amount exceeds outstanding") {
         setError(AP_VALIDATION.payTooMuch);
+      } else if (err instanceof Error && err.message === "category required for payment") {
+        setError(AP_VALIDATION.categoryRequiredForPayment);
       } else {
         setError(ENGINE_ERROR.message);
       }
@@ -153,6 +179,13 @@ export function ApPaymentForm({ row, onClose, onPosted }: Props) {
             {AP_FIELDS.outstanding}: ฿{formatSatang(row.outstandingSatang)}
           </p>
         </div>
+
+        {needsCategoryPicker && (
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.category}</label>
+            <CategoryPicker value={pickedCategoryCode} onChange={setPickedCategoryCode} recentCodes={recentCodes} />
+          </div>
+        )}
 
         <div>
           <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{FIELD_LABELS.paymentMethod}</label>

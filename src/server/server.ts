@@ -371,7 +371,18 @@ export function validateApRowInput(body: unknown): ValidatedApRowInput {
     dueDate = b.dueDate;
   }
 
-  if (!isExpenseCategoryCode(b.categoryCode)) return { ok: false, error: "invalid categoryCode" };
+  // RULING 1 (2026-07): categoryCode is now OPTIONAL on an AP row itself — a
+  // row can be filed before its category is known (an explicit "ไม่ระบุ
+  // หมวด" state client-side, never a hidden default here). A row that DOES
+  // specify one must still name a real leaf; only a genuinely absent value
+  // (undefined/null) is accepted as "no category yet". PAYMENTS against the
+  // row are a separate, still-mandatory-category path — see
+  // validateApPaymentInput and the payment route below.
+  let categoryCode: ExpenseCategoryCode | null = null;
+  if (b.categoryCode !== undefined && b.categoryCode !== null) {
+    if (!isExpenseCategoryCode(b.categoryCode)) return { ok: false, error: "invalid categoryCode" };
+    categoryCode = b.categoryCode;
+  }
 
   if (b.entity !== undefined && b.entity !== null && (typeof b.entity !== "string" || b.entity.length > 200)) {
     return { ok: false, error: "invalid entity" };
@@ -394,7 +405,7 @@ export function validateApRowInput(body: unknown): ValidatedApRowInput {
       discountSatang: discountSatangRaw,
       dueDate,
       entity,
-      categoryCode: b.categoryCode as ExpenseCategoryCode,
+      categoryCode,
       note,
     },
   };
@@ -421,7 +432,20 @@ function validateApPaymentInput(body: unknown): ValidatedApPaymentInput {
   }
   if (!isPaymentMethod(b.paymentMethod)) return { ok: false, error: "invalid paymentMethod" };
 
-  return { ok: true, value: { date: b.date, amountSatang: b.amountSatang, paymentMethod: b.paymentMethod } };
+  // RULING 1: categoryCode is optional here too — it's only MEANINGFUL (and
+  // required) when the row being paid has no category of its own yet. A
+  // malformed value is still rejected as a shape error regardless, so a
+  // broken client never silently posts an unmapped code.
+  let categoryCode: ExpenseCategoryCode | undefined;
+  if (b.categoryCode !== undefined && b.categoryCode !== null) {
+    if (!isExpenseCategoryCode(b.categoryCode)) return { ok: false, error: "invalid categoryCode" };
+    categoryCode = b.categoryCode;
+  }
+
+  return {
+    ok: true,
+    value: { date: b.date, amountSatang: b.amountSatang, paymentMethod: b.paymentMethod, categoryCode },
+  };
 }
 
 /** Compares two ezBookkeeping transaction ids (decimal-digit strings,
@@ -687,6 +711,28 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         }
         if (!row) return json(404, { error: "not found" });
 
+        // RULING 1 (2026-07): a row's OWN category is optional, but every
+        // engine transaction — a payment posts as one — must carry a real
+        // category. Re-derive the requirement from the FRESHLY re-read
+        // row's own state (never a client-sent flag): a null-category row
+        // requires the payment form's picker to have supplied one, with a
+        // distinct error from every other validation failure so the client
+        // can show a specific message rather than a generic one. A row that
+        // already has a category ignores any categoryCode the client sent
+        // (its own stays authoritative) and behaves exactly as before this
+        // ruling.
+        let categoryCodeForPosting: ExpenseCategoryCode;
+        let categoryCodeToPersist: ExpenseCategoryCode | null = null;
+        if (row.categoryCode === null) {
+          if (!validated.value.categoryCode) {
+            return json(400, { error: "category required for payment" });
+          }
+          categoryCodeForPosting = validated.value.categoryCode;
+          categoryCodeToPersist = validated.value.categoryCode;
+        } else {
+          categoryCodeForPosting = row.categoryCode;
+        }
+
         // Invariant enforcement: outstanding must never go negative on the
         // payment path (H1 fix) — reject an overpayment against the
         // FRESHLY re-read balance rather than one read before the lock.
@@ -705,22 +751,26 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         const transactionId = await createApPaymentTransaction({
           date: validated.value.date,
           amountSatang: validated.value.amountSatang,
-          categoryCode: row.categoryCode,
+          categoryCode: categoryCodeForPosting,
           paymentMethod: validated.value.paymentMethod,
           comment,
           email: identity.email,
           apRowId: rowId,
         });
         try {
-          const paymentId = apStore.addApPayment(rowId, {
-            date: validated.value.date,
-            amountSatang: validated.value.amountSatang,
-            paymentMethod: validated.value.paymentMethod,
-            kind,
-            installmentNumber,
-            payerEmail: identity.email,
-            transactionId,
-          });
+          const paymentId = apStore.addApPayment(
+            rowId,
+            {
+              date: validated.value.date,
+              amountSatang: validated.value.amountSatang,
+              paymentMethod: validated.value.paymentMethod,
+              kind,
+              installmentNumber,
+              payerEmail: identity.email,
+              transactionId,
+            },
+            categoryCodeToPersist,
+          );
           return json(201, { paymentId, transactionId });
         } catch (err) {
           // H4a fix: the ledger transaction posted but the local payment row

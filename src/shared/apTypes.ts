@@ -41,7 +41,14 @@ export interface ApRow {
   discountSatang: number;
   dueDate: string | null;
   entity: string;
-  categoryCode: ExpenseCategoryCode;
+  /** RULING 1 (2026-07): optional — a row can be filed before its category
+   * is known (an explicit "ไม่ระบุหมวด" state, never a hidden default; see
+   * src/client/components/ApRowDrawer.tsx). A PAYMENT against the row still
+   * always needs a real category (every engine transaction must have one) —
+   * see paymentNeedsCategoryPicker below and src/server/server.ts's payment
+   * route, which requires and persists one back onto the row the first time
+   * it's paid. */
+  categoryCode: ExpenseCategoryCode | null;
   note: string;
   /** ISO 8601 datetime (UTC, not just a date) — used ONLY as the final
    * insertion-order sort tiebreaker (ApPage.tsx's sortRows). M1 fix: the
@@ -78,7 +85,7 @@ export interface ApListFilter {
  * (spec §4 item 1). */
 export interface ApCreditorHint {
   creditor: string;
-  categoryCode: ExpenseCategoryCode;
+  categoryCode: ExpenseCategoryCode | null;
   entity: string;
 }
 
@@ -104,7 +111,7 @@ export interface ApRowInput {
   discountSatang: number;
   dueDate: string | null;
   entity: string;
-  categoryCode: ExpenseCategoryCode;
+  categoryCode: ExpenseCategoryCode | null;
   note: string;
 }
 
@@ -112,6 +119,13 @@ export interface ApPaymentInput {
   date: string;
   amountSatang: number;
   paymentMethod: PaymentMethod;
+  /** RULING 1: required ONLY when the row being paid currently has a null
+   * categoryCode — the server re-derives whether it's required from the
+   * row's own state (never trusts a client-sent flag) and, when supplied,
+   * persists it back onto the row inside the same write-lock critical
+   * section as the payment insert. Omitted/ignored when the row already has
+   * a category. */
+  categoryCode?: ExpenseCategoryCode;
 }
 
 export interface CreateApRowResponse {
@@ -210,6 +224,20 @@ export function derivePaymentKind(existingPayments: readonly ApPayment[], settle
   if (!hasDeposit) return { kind: "deposit", installmentNumber: null };
   const installmentCount = existingPayments.filter((p) => p.kind === "installment").length;
   return { kind: "installment", installmentNumber: installmentCount + 1 };
+}
+
+// ── RULING 1: payment category requirement (2026-07) ────────────────────
+
+/** Whether recording a payment against a row with this categoryCode must
+ * collect a category from the clerk first — true iff the row itself has no
+ * category yet. Shared so the client's ApPaymentForm (which decides whether
+ * to render the 21-leaf CategoryPicker at all) and src/server/server.ts's
+ * payment route (which decides whether to require/persist one) apply the
+ * EXACT same rule, never two independently-drifting copies. A row that
+ * already carries a category keeps the pre-ruling behavior — no picker, no
+ * server-side requirement. */
+export function paymentNeedsCategoryPicker(rowCategoryCode: ExpenseCategoryCode | null): boolean {
+  return rowCategoryCode === null;
 }
 
 /** `ap:<rowId>` — the ezBookkeeping tag every posted payment for this row

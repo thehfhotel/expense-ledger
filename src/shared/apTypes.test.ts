@@ -8,6 +8,7 @@ import {
   deriveStatus,
   derivePaymentKind,
   paymentKindSuffix,
+  paymentNeedsCategoryPicker,
   statusRank,
   type ApPayment,
 } from "./apTypes.ts";
@@ -162,6 +163,16 @@ describe("paymentKindSuffix (L3 fix — split out so a truncation step can keep 
 
   test("งวดที่ N for an installment", () => {
     expect(paymentKindSuffix("installment", 3)).toBe(" (งวดที่ 3)");
+  });
+});
+
+describe("paymentNeedsCategoryPicker (RULING 1 — payments still require a category)", () => {
+  test("true when the row has no category yet", () => {
+    expect(paymentNeedsCategoryPicker(null)).toBe(true);
+  });
+
+  test("false once the row already carries a category", () => {
+    expect(paymentNeedsCategoryPicker("commission-booking")).toBe(false);
   });
 });
 

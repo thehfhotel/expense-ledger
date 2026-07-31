@@ -3,6 +3,7 @@ import { EngineUnreachableError, SessionExpiredError, listApRows } from "../api.
 import { navigate } from "../App.tsx";
 import { currentMonthBangkok, isoToBuddhist, monthToThaiLong, shiftMonths, todayBangkok } from "../../shared/date.ts";
 import { formatSatang } from "../../shared/money.ts";
+import { categoryByCode } from "../../shared/categories.ts";
 import {
   deriveStatus,
   statusRank,
@@ -47,6 +48,13 @@ function statusLabel(status: ApStatus): string {
   if (status === "dueSoon") return AP_STATUS.dueSoon;
   if (status === "settled") return AP_STATUS.settled;
   return AP_STATUS.open;
+}
+
+/** RULING 1 (2026-07): a neutral label for the register's category chip —
+ * the real leaf label once one is set, else the explicit "ไม่ระบุหมวด"
+ * state (never blank/undefined). */
+function categoryChipLabel(row: ApRow): string {
+  return row.categoryCode ? categoryByCode(row.categoryCode).label : AP_FIELDS.categoryUnset;
 }
 
 /** statusRank -> dueDate ascending (nulls last) -> createdAt descending
@@ -296,8 +304,11 @@ export function ApPage({ filter }: Props) {
                   >
                     {isOverdue && <span className="absolute inset-y-0 left-0 w-0.5 bg-bad" aria-hidden="true" />}
                     <span className="min-w-0 truncate text-ink">{row.creditor}</span>
-                    <span className="min-w-0 truncate text-ink" title={row.item}>
-                      {row.item}
+                    <span className="min-w-0 text-ink" title={row.item}>
+                      <span className="block truncate">{row.item}</span>
+                      <span className="mt-0.5 inline-block truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
+                        {categoryChipLabel(row)}
+                      </span>
                     </span>
                     <span className={"text-right tabular-nums font-semibold " + (isOverdue ? "text-bad" : "text-ink")}>
                       ฿{formatSatang(row.outstandingSatang)}
@@ -374,6 +385,9 @@ export function ApPage({ filter }: Props) {
                     </span>
                   </div>
                   <span className="truncate text-xs text-ink-muted">{row.item}</span>
+                  <span className="inline-block w-fit truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
+                    {categoryChipLabel(row)}
+                  </span>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs text-ink-muted">
                       {row.dueDate ? isoToBuddhist(row.dueDate) : EMPTY_VALUE}

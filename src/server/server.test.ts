@@ -560,6 +560,47 @@ describe("AP register: row validation and CRUD (no engine involved)", () => {
     expect(res.status).toBe(400);
   });
 
+  describe("RULING 1 (2026-07): categoryCode is optional on the row itself", () => {
+    test("accepts a missing categoryCode on create", async () => {
+      const body = baseApRowBody();
+      delete (body as Record<string, unknown>).categoryCode;
+      const res = await fetchHandler(post(body));
+      expect(res.status).toBe(201);
+      const { id } = (await res.json()) as { id: string };
+      expect(apStore.getApRow(id)!.categoryCode).toBeNull();
+    });
+
+    test("accepts an explicit null categoryCode on create", async () => {
+      const res = await fetchHandler(post(baseApRowBody({ categoryCode: null })));
+      expect(res.status).toBe(201);
+      const { id } = (await res.json()) as { id: string };
+      expect(apStore.getApRow(id)!.categoryCode).toBeNull();
+    });
+
+    test("PATCH accepts clearing an existing categoryCode to null", async () => {
+      const createRes = await fetchHandler(post(baseApRowBody({ categoryCode: "commission-booking" })));
+      const { id } = (await createRes.json()) as { id: string };
+      const patchRes = await fetchHandler(
+        devRequest(`/api/ap/rows/${id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(baseApRowBody({ categoryCode: null })),
+        }),
+      );
+      expect(patchRes.status).toBe(200);
+      expect(apStore.getApRow(id)!.categoryCode).toBeNull();
+    });
+
+    test("a null-category row still round-trips through GET /api/ap/rows with categoryCode: null", async () => {
+      const createRes = await fetchHandler(post(baseApRowBody({ categoryCode: null })));
+      const { id } = (await createRes.json()) as { id: string };
+      const listRes = await fetchHandler(devRequest("/api/ap/rows?f=all"));
+      const body = (await listRes.json()) as { rows: { id: string; categoryCode: string | null }[] };
+      const row = body.rows.find((r) => r.id === id);
+      expect(row?.categoryCode).toBeNull();
+    });
+  });
+
   test("accepts a blank/absent due date — unlike ordinary expenses, unbounded and optional", async () => {
     const res = await fetchHandler(post(baseApRowBody({ dueDate: null })));
     expect(res.status).toBe(201);
@@ -973,6 +1014,67 @@ describe("AP register: payment posting (mocked engine HTTP)", () => {
     const secondAddCall = addCalls[addCalls.length - 1];
     const comment = (secondAddCall?.body as { comment: string }).comment;
     expect(comment).toContain("(งวดที่ 1)");
+  });
+
+  describe("RULING 1 (2026-07): payments still require a category", () => {
+    test("400s with a distinct error posting a payment against a null-category row with no categoryCode supplied", async () => {
+      const rowId = createRow({ categoryCode: null });
+      const res = await fetchHandler(postPayment(rowId, { date: todayBangkok(), amountSatang: 4_000, paymentMethod: "cash" }));
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("category required for payment");
+      // Distinct from every other AP validation error already in this file.
+      expect(body.error).not.toBe("amount exceeds outstanding");
+      expect(body.error).not.toBe("invalid categoryCode");
+      expect(calls.some((c) => c.url.includes("/transactions/add.json"))).toBe(false);
+
+      const row = apStore.getApRow(rowId)!;
+      expect(row.payments.length).toBe(0);
+      expect(row.categoryCode).toBeNull();
+    });
+
+    test("posts using the supplied category and persists it onto the row when the row had none", async () => {
+      const rowId = createRow({ categoryCode: null });
+      const res = await fetchHandler(
+        postPayment(rowId, {
+          date: todayBangkok(),
+          amountSatang: 4_000,
+          paymentMethod: "cash",
+          categoryCode: "commission-booking",
+        }),
+      );
+      expect(res.status).toBe(201);
+
+      const row = apStore.getApRow(rowId)!;
+      expect(row.categoryCode).toBe("commission-booking");
+      expect(row.outstandingSatang).toBe(6_000);
+      expect(row.payments.length).toBe(1);
+
+      const addTxnCall = calls.find((c) => c.url.includes("/transactions/add.json"));
+      expect(addTxnCall).toBeDefined();
+    });
+
+    test("a row that already has a category ignores any categoryCode the client sends and keeps its own", async () => {
+      const rowId = createRow({ categoryCode: "commission-booking" });
+      const res = await fetchHandler(
+        postPayment(rowId, {
+          date: todayBangkok(),
+          amountSatang: 4_000,
+          paymentMethod: "cash",
+          categoryCode: "housekeeping",
+        }),
+      );
+      expect(res.status).toBe(201);
+      const row = apStore.getApRow(rowId)!;
+      expect(row.categoryCode).toBe("commission-booking");
+    });
+
+    test("a row that already has a category needs no categoryCode at all in the payment body (pre-ruling behavior unchanged)", async () => {
+      const rowId = createRow({ categoryCode: "commission-booking" });
+      const res = await fetchHandler(postPayment(rowId, { date: todayBangkok(), amountSatang: 4_000, paymentMethod: "cash" }));
+      expect(res.status).toBe(201);
+      expect(apStore.getApRow(rowId)!.categoryCode).toBe("commission-booking");
+    });
   });
 });
 

@@ -187,6 +187,10 @@ export const AP_FIELDS = {
   note: "หมายเหตุ",
   category: "หมวดค่าใช้จ่าย",
   paidBy: "ผู้จ่าย",
+  /** RULING 1: the explicit "no category yet" state — a real, chosen value
+   * on an AP row, never a hidden default. Doubles as the neutral chip/dash
+   * shown wherever a null categoryCode renders. */
+  categoryUnset: "ไม่ระบุหมวด",
 };
 
 export const AP_STATUS = {
@@ -229,6 +233,11 @@ export const AP_VALIDATION = {
   payTooMuch: "จำนวนที่จ่ายเกินยอดค้างชำระ",
   hasPayments: "รายการนี้มีการชำระแล้ว ลบไม่ได้ - ให้ยกเลิกการชำระก่อน",
   undoLocked: "ยกเลิกไม่ได้ - รายการบัญชีอยู่ในเดือนที่ปิดแล้ว",
+  /** RULING 1: shown in the payment form when the row has no category yet
+   * and the clerk hasn't picked one — a payment can never post without a
+   * real category, matching the server's distinct "category required for
+   * payment" 400. */
+  categoryRequiredForPayment: "เลือกหมวดค่าใช้จ่ายก่อนบันทึกการชำระ",
 };
 
 export const AP_ENTITIES = ["บจก.สายชล เฮอริเทจ", "HF Ville", "HF", "SCM", "บจก.สายชล เฮอริเทจ ทหารไทย"];

@@ -305,3 +305,123 @@ describe("lazy-open", () => {
     expect(existsSync(process.env.AP_DB_PATH!)).toBe(true);
   });
 });
+
+describe("RULING 1 (2026-07): nullable categoryCode", () => {
+  test("createApRow accepts categoryCode: null", () => {
+    const id = createApRow(baseRowInput({ categoryCode: null }), "clerk@thehfhotel.org");
+    const row = getApRow(id)!;
+    expect(row.categoryCode).toBeNull();
+  });
+
+  test("updateApRow can clear an existing categoryCode to null", () => {
+    const id = createApRow(baseRowInput({ categoryCode: "commission-booking" }), "clerk@thehfhotel.org");
+    updateApRow(id, baseRowInput({ categoryCode: null }));
+    expect(getApRow(id)!.categoryCode).toBeNull();
+  });
+
+  test("addApPayment with a categoryCodeToPersist atomically sets the row's category alongside the payment insert", () => {
+    const id = createApRow(baseRowInput({ categoryCode: null, amountSatang: 10_000 }), "clerk@thehfhotel.org");
+    addApPayment(
+      id,
+      {
+        date: "2026-07-05",
+        amountSatang: 4_000,
+        paymentMethod: "cash",
+        kind: "deposit",
+        installmentNumber: null,
+        payerEmail: "clerk@thehfhotel.org",
+        transactionId: "tx-cat-1",
+      },
+      "commission-booking",
+    );
+    const row = getApRow(id)!;
+    expect(row.categoryCode).toBe("commission-booking");
+    expect(row.outstandingSatang).toBe(6_000);
+    expect(row.payments.length).toBe(1);
+  });
+
+  test("addApPayment with no categoryCodeToPersist (default) never touches an existing category", () => {
+    const id = createApRow(baseRowInput({ categoryCode: "housekeeping", amountSatang: 10_000 }), "clerk@thehfhotel.org");
+    addApPayment(id, {
+      date: "2026-07-05",
+      amountSatang: 4_000,
+      paymentMethod: "cash",
+      kind: "deposit",
+      installmentNumber: null,
+      payerEmail: "clerk@thehfhotel.org",
+      transactionId: "tx-cat-2",
+    });
+    expect(getApRow(id)!.categoryCode).toBe("housekeeping");
+  });
+
+  test("migrateCategoryCodeNullable: a pre-ruling volume with category_code NOT NULL is upgraded transparently, preserving existing rows", () => {
+    // Simulate a volume created before this ruling: build the OLD schema by
+    // hand (category_code TEXT NOT NULL) with one pre-existing row, close it,
+    // then let apStore's normal lazy-open path (which runs the migration on
+    // every open) pick it up.
+    _resetForTests();
+    const oldDb = new Database(process.env.AP_DB_PATH!, { create: true });
+    oldDb.exec(`
+      CREATE TABLE ap_row (
+        id TEXT PRIMARY KEY,
+        creditor TEXT NOT NULL,
+        item TEXT NOT NULL,
+        amount_satang INTEGER NOT NULL,
+        vat_satang INTEGER,
+        wht_satang INTEGER,
+        discount_satang INTEGER NOT NULL DEFAULT 0,
+        due_date TEXT,
+        entity TEXT NOT NULL DEFAULT '',
+        category_code TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        filed_date TEXT NOT NULL
+      );
+    `);
+    oldDb.exec(`
+      CREATE TABLE ap_payment (
+        id TEXT PRIMARY KEY,
+        row_id TEXT NOT NULL REFERENCES ap_row(id) ON DELETE CASCADE,
+        date TEXT NOT NULL,
+        amount_satang INTEGER NOT NULL,
+        payment_method TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        installment_number INTEGER,
+        payer_email TEXT NOT NULL,
+        transaction_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    oldDb
+      .query(
+        `INSERT INTO ap_row
+          (id, creditor, item, amount_satang, vat_satang, wht_satang, discount_satang, due_date, entity, category_code, note, created_at, created_by, filed_date)
+         VALUES ('pre-existing-1', 'Booking.com', 'ค่าคอมมิชชั่น', 10000, NULL, NULL, 0, NULL, 'HF', 'commission-booking', '', '2026-07-01T00:00:00.000Z', 'seed:workbook-2026-07', '2026-07-01')`,
+      )
+      .run();
+    oldDb.close();
+
+    // The pre-existing table's column really is NOT NULL before migration.
+    const before = new Database(process.env.AP_DB_PATH!, { readonly: true });
+    const beforeInfo = before.query("PRAGMA table_info(ap_row)").all() as { name: string; notnull: number }[];
+    before.close();
+    expect(beforeInfo.find((c) => c.name === "category_code")?.notnull).toBe(1);
+
+    // Any store call opens the db (running the migration first).
+    const preExisting = getApRow("pre-existing-1")!;
+    expect(preExisting.creditor).toBe("Booking.com");
+    expect(preExisting.categoryCode).toBe("commission-booking");
+
+    // The column is now nullable, and a fresh null-category row works.
+    const after = new Database(process.env.AP_DB_PATH!, { readonly: true });
+    const afterInfo = after.query("PRAGMA table_info(ap_row)").all() as { name: string; notnull: number }[];
+    after.close();
+    expect(afterInfo.find((c) => c.name === "category_code")?.notnull).toBe(0);
+
+    const newId = createApRow(baseRowInput({ categoryCode: null }), "clerk@thehfhotel.org");
+    expect(getApRow(newId)!.categoryCode).toBeNull();
+    // The pre-existing row survived the table rebuild untouched.
+    expect(getApRow("pre-existing-1")!.creditor).toBe("Booking.com");
+  });
+});

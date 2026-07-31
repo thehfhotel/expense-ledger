@@ -243,7 +243,15 @@ export interface SeedRow {
   discountSatang: number;
   dueDate: string | null;
   entity: string;
-  categoryCode: SeedCategoryCode;
+  /** `SeedCategoryCode` for a row this file's own automatic
+   * evaluateWorkbookRow scan produced (only ever one of the 3 mapped
+   * families — never null, see resolveSeedCategory). Widened to
+   * `ExpenseCategoryCode | null` so a HAND-CURATED seed batch (e.g.
+   * scripts/seed-ap-2026-07b.ts, built outside this file's automatic
+   * scan/mapping/integrity-check pipeline) can also produce a `SeedRow` —
+   * RULING 1 (2026-07) made categoryCode optional on an AP row itself, and a
+   * hand-picked row may deliberately carry no category yet. */
+  categoryCode: ExpenseCategoryCode | null;
   note: string;
   flags: string[];
 }
