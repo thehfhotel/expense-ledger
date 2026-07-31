@@ -1,4 +1,12 @@
 import type {
+  ApListFilter,
+  ApPaymentInput,
+  ApRowInput,
+  ApRowsResponse,
+  CreateApPaymentResponse,
+  CreateApRowResponse,
+} from "../shared/apTypes.ts";
+import type {
   CategoryListItem,
   CreateExpenseResponse,
   ExpenseInput,
@@ -118,4 +126,37 @@ export function uploadExpensePhoto(id: string, file: Blob, filename: string): Pr
 
 export function deleteExpensePhoto(id: string, photoId: string): Promise<void> {
   return api(`/expenses/${id}/photo/${photoId}`, { method: "DELETE" });
+}
+
+// ── AP register ("ค้างจ่าย") ────────────────────────────────────────────
+
+/** `filter` mirrors ApPage's three chips exactly: "open"/"all" map to
+ * `?f=`, "month" (with a value) maps to `?m=` — see src/shared/apTypes.ts's
+ * ApListFilter and src/server/server.ts's GET /api/ap/rows for the same
+ * mode/precedence rule (a month value always wins over `f`). */
+export function listApRows(filter: ApListFilter): Promise<ApRowsResponse> {
+  const params = new URLSearchParams();
+  if (filter.mode === "month" && filter.month) params.set("m", filter.month);
+  else params.set("f", filter.mode === "all" ? "all" : "open");
+  return api(`/ap/rows?${params.toString()}`);
+}
+
+export function createApRow(input: ApRowInput): Promise<CreateApRowResponse> {
+  return api("/ap/rows", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateApRow(id: string, input: ApRowInput): Promise<CreateApRowResponse> {
+  return api(`/ap/rows/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function deleteApRow(id: string): Promise<void> {
+  return api(`/ap/rows/${id}`, { method: "DELETE" });
+}
+
+export function createApPayment(rowId: string, input: ApPaymentInput): Promise<CreateApPaymentResponse> {
+  return api(`/ap/rows/${rowId}/payments`, { method: "POST", body: JSON.stringify(input) });
+}
+
+export function deleteApPayment(rowId: string, paymentId: string): Promise<void> {
+  return api(`/ap/rows/${rowId}/payments/${paymentId}`, { method: "DELETE" });
 }

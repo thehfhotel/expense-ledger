@@ -8,6 +8,7 @@ export const APP_TITLE = "บันทึกค่าใช้จ่าย";
 export const NAV = {
   entry: "บันทึกรายจ่าย",
   month: "สรุปเดือน",
+  ap: "ค้างจ่าย",
 };
 
 /** document.title = `${APP_TITLE} · ${screen}` — see App.tsx's title effect. */
@@ -138,3 +139,79 @@ export function loadFailedDetail(error: string): string {
 export const DELETE_FAILED = "ลบรายการไม่สำเร็จ ลองใหม่อีกครั้ง";
 
 export const EMPTY_VALUE = "-";
+
+// ── AP register ("ค้างจ่าย" — the third tab, frontend spec §8) ────────────
+
+export const AP = {
+  nav: "ค้างจ่าย",
+  add: "เพิ่มรายการค้างจ่าย",
+  heading: "รายการค้างจ่าย",
+  totalOutstanding: "รวมยอดค้างชำระ",
+  overdueCount: (n: number) => `เกินกำหนด ${n} รายการ`,
+  filterOpen: "ค้างจ่าย",
+  filterAll: "ทั้งหมด",
+  filterMonth: "รายเดือน",
+};
+
+export const AP_FIELDS = {
+  creditor: "ชื่อเจ้าหนี้",
+  item: "รายการ",
+  amount: "จำนวนเงิน",
+  vat: "VAT 7%",
+  wht: "ภาษีหัก ณ ที่จ่าย",
+  gross: "จำนวนรวม",
+  deposit: "มัดจำ",
+  installment: (n: number) => `งวดที่ ${n}`,
+  discount: "ส่วนลด",
+  outstanding: "ยอดค้างชำระ",
+  dueDate: "กำหนดชำระ",
+  entity: "ในนาม",
+  status: "สถานะ",
+  note: "หมายเหตุ",
+  category: "หมวดค่าใช้จ่าย",
+  paidBy: "ผู้จ่าย",
+};
+
+export const AP_STATUS = {
+  open: "ค้างจ่าย",
+  dueSoon: "ใกล้ครบกำหนด",
+  overdue: "เกินกำหนด",
+  settled: "จ่ายครบ",
+  /** "จ่ายแล้ว 21/7/2569" — the sheet's own wording. */
+  settledOn: (dateLabel: string) => `จ่ายแล้ว ${dateLabel}`,
+};
+
+export const AP_PAY = {
+  action: "ชำระ",
+  heading: "บันทึกการชำระ",
+  date: "วันที่จ่าย",
+  amount: "จำนวนที่จ่าย",
+  payFull: "ชำระทั้งหมด",
+  submit: "บันทึกการชำระ",
+  cancel: "ยกเลิก",
+  history: "ประวัติการชำระ",
+  historyEmpty: "ยังไม่มีการชำระ",
+  undo: "ยกเลิกการชำระ",
+  kindFull: "จ่ายครบ",
+  vatAuto: "คิด VAT 7%",
+  /** Under the category picker — the "no re-typing" promise. */
+  autoPostNotice: "เมื่อบันทึกการชำระ ระบบจะลงบัญชีให้อัตโนมัติในหมวดนี้ ไม่ต้องบันทึกซ้ำที่หน้าบันทึกรายจ่าย",
+  posted: (category: string, dateLabel: string) => `ลงบัญชีในหมวด ${category} วันที่ ${dateLabel} แล้ว`,
+};
+
+export const AP_EMPTY = {
+  none: "ยังไม่มีรายการค้างจ่าย - เริ่มจากเพิ่มบิลใบแรก",
+  noneOpen: "ไม่มีรายการค้างจ่าย - จ่ายครบทุกรายการแล้ว",
+  noneMonth: "ไม่มีรายการในเดือนนี้",
+};
+
+export const AP_VALIDATION = {
+  creditorRequired: "กรอกชื่อเจ้าหนี้",
+  itemRequired: "กรอกรายการ",
+  negativeOutstanding: "ยอดค้างชำระติดลบ - ตรวจสอบจำนวนเงินหรือส่วนลด",
+  payTooMuch: "จำนวนที่จ่ายเกินยอดค้างชำระ",
+  hasPayments: "รายการนี้มีการชำระแล้ว ลบไม่ได้ - ให้ยกเลิกการชำระก่อน",
+  undoLocked: "ยกเลิกไม่ได้ - รายการบัญชีอยู่ในเดือนที่ปิดแล้ว",
+};
+
+export const AP_ENTITIES = ["บจก.สายชล เฮอริเทจ", "HF Ville", "HF", "SCM", "บจก.สายชล เฮอริเทจ ทหารไทย"];

@@ -1,24 +1,43 @@
 import { useEffect, useState } from "react";
 import { isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
 import { currentMonthBangkok, isValidMonth } from "../shared/date.ts";
+import type { ApListFilter } from "../shared/apTypes.ts";
 import { setSessionExpiredHandler } from "./api.ts";
 import { SessionExpiredOverlay } from "./components/SessionExpiredOverlay.tsx";
 import { APP_TITLE, NAV, pageTitle } from "./labels.ts";
+import { ApPage } from "./pages/ApPage.tsx";
 import { EntryPage } from "./pages/EntryPage.tsx";
 import { MonthPage } from "./pages/MonthPage.tsx";
 
 // pushState micro-router, copied from income-ledger's src/client/App.tsx —
-// no library, no hash routing (frontend spec §1). Two real routes; the
+// no library, no hash routing (frontend spec §1). Three real routes; the
 // edit drawer and photo lightbox are overlays, not routes.
 
 const SHELL_WIDTH = "mx-auto w-full max-w-[1100px]";
 
-type Route = { kind: "entry"; cat?: ExpenseCategoryCode } | { kind: "month"; month: string };
+type Route =
+  | { kind: "entry"; cat?: ExpenseCategoryCode }
+  | { kind: "month"; month: string }
+  | { kind: "ap"; filter: ApListFilter };
+
+/** Mirrors src/server/server.ts's GET /api/ap/rows precedence exactly: a
+ * valid `m` always wins over `f` (a month value implies month-filter mode,
+ * spec §2 "?m=YYYY-MM (implies month filter)"). */
+function parseApFilter(search: string): ApListFilter {
+  const params = new URLSearchParams(search);
+  const m = params.get("m");
+  if (m && isValidMonth(m)) return { mode: "month", month: m };
+  const f = params.get("f");
+  return { mode: f === "all" ? "all" : "open" };
+}
 
 function parseRoute(pathname: string, search: string): Route {
   const parts = pathname.replace(/\/$/, "").split("/").filter(Boolean);
   if (parts[0] === "month" && parts[1] && isValidMonth(parts[1])) {
     return { kind: "month", month: parts[1] };
+  }
+  if (parts[0] === "ap") {
+    return { kind: "ap", filter: parseApFilter(search) };
   }
   const params = new URLSearchParams(search);
   const catParam = params.get("cat");
@@ -46,12 +65,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    document.title = pageTitle(route.kind === "month" ? NAV.month : NAV.entry);
+    const screen = route.kind === "month" ? NAV.month : route.kind === "ap" ? NAV.ap : NAV.entry;
+    document.title = pageTitle(screen);
   }, [route.kind]);
 
   const navItems: { key: string; label: string; active: boolean; path: string }[] = [
     { key: "entry", label: NAV.entry, active: route.kind === "entry", path: "/entry" },
     { key: "month", label: NAV.month, active: route.kind === "month", path: `/month/${currentMonthBangkok()}` },
+    { key: "ap", label: NAV.ap, active: route.kind === "ap", path: "/ap" },
   ];
 
   return (
@@ -80,6 +101,7 @@ export function App() {
       <main className={SHELL_WIDTH + " min-w-0 px-4 py-4"}>
         {route.kind === "entry" && <EntryPage key={route.cat ?? "none"} initialCategoryCode={route.cat} />}
         {route.kind === "month" && <MonthPage key={route.month} month={route.month} />}
+        {route.kind === "ap" && <ApPage filter={route.filter} />}
       </main>
 
       {sessionExpired && <SessionExpiredOverlay />}
