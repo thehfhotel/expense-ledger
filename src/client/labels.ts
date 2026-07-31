@@ -191,6 +191,12 @@ export const AP_FIELDS = {
    * on an AP row, never a hidden default. Doubles as the neutral chip/dash
    * shown wherever a null categoryCode renders. */
   categoryUnset: "ไม่ระบุหมวด",
+  /** รูปบิล section heading (ApRowDrawer) — bill/invoice photos, independent
+   * of payment state. */
+  photos: "รูปบิล",
+  /** "รูปบิล (2)" — the register row's small photo-count indicator, shown
+   * only when apRowPhotoCount returns non-null (spec: "> 0"). */
+  photoCount: (n: number) => `รูปบิล (${n})`,
 };
 
 export const AP_STATUS = {
@@ -247,6 +253,12 @@ export const AP_VALIDATION = {
    * a malformed category value reads as a validation problem, not the
    * ledger engine being unreachable. */
   invalidCategoryForPayment: "หมวดค่าใช้จ่ายไม่ถูกต้อง ลองเลือกใหม่อีกครั้ง",
+  /** POST /api/ap/rows/:id/photos's 413 — distinct from the generic
+   * ap_store_error fallback so an oversized file reads as a validation
+   * problem, not a system failure. */
+  photoTooLarge: "ไฟล์รูปใหญ่เกินไป (จำกัดไม่เกิน 10 MB)",
+  /** Same route's 415. */
+  photoUnsupportedType: "ไม่รองรับไฟล์ประเภทนี้ — ใช้ได้เฉพาะ JPEG, PNG, WEBP หรือ HEIC",
 };
 
 export const AP_ENTITIES = ["บจก.สายชล เฮอริเทจ", "HF Ville", "HF", "SCM", "บจก.สายชล เฮอริเทจ ทหารไทย"];

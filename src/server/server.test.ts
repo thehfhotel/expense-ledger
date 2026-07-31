@@ -1322,3 +1322,168 @@ describe("AP register: payment undo (mocked engine HTTP)", () => {
     expect(apStore.getApPayment(rowId, paymentId)).toBeNull();
   });
 });
+
+describe("AP register: row photos (รูปบิล)", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ap-photo-test-"));
+    process.env.AP_DB_PATH = join(tmpDir, "ap.db");
+    apStore._resetForTests();
+  });
+
+  afterEach(() => {
+    resetAuthEnv();
+    apStore._resetForTests();
+    delete process.env.AP_DB_PATH;
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function seedRow(): Promise<string> {
+    const res = await fetchHandler(
+      devRequest("/api/ap/rows", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(baseApRowBody()),
+      }),
+    );
+    const { id } = (await res.json()) as { id: string };
+    return id;
+  }
+
+  function photoUploadRequest(rowId: string, blob: Blob, filename = "bill.jpg"): Request {
+    const form = new FormData();
+    form.append("picture", blob, filename);
+    return devRequest(`/api/ap/rows/${rowId}/photos`, { method: "POST", body: form });
+  }
+
+  test("401s unauthenticated, same JSON {error} shape as every other /api route", async () => {
+    resetAuthEnv();
+    const form = new FormData();
+    form.append("picture", new Blob([new Uint8Array(4)], { type: "image/jpeg" }), "bill.jpg");
+    const res = await fetchHandler(
+      new Request("http://localhost/api/ap/rows/does-not-matter/photos", { method: "POST", body: form }),
+    );
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "unauthenticated" });
+  });
+
+  test("404s uploading to an unknown row id", async () => {
+    const res = await fetchHandler(
+      photoUploadRequest("does-not-exist", new Blob([new Uint8Array(4)], { type: "image/jpeg" })),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("400s a request with no picture field at all", async () => {
+    const rowId = await seedRow();
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${rowId}/photos`, { method: "POST", body: new FormData() }));
+    expect(res.status).toBe(400);
+  });
+
+  test("415s an unsupported content type, before writing anything to disk", async () => {
+    const rowId = await seedRow();
+    const res = await fetchHandler(
+      photoUploadRequest(rowId, new Blob([new Uint8Array(4)], { type: "application/pdf" }), "bill.pdf"),
+    );
+    expect(res.status).toBe(415);
+    expect(await res.json()).toEqual({ error: "unsupported photo type" });
+  });
+
+  test("413s a file over the 10 MiB cap", async () => {
+    const rowId = await seedRow();
+    const big = new Uint8Array(apStore.AP_PHOTO_MAX_BYTES + 1);
+    const res = await fetchHandler(photoUploadRequest(rowId, new Blob([big], { type: "image/jpeg" })));
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "photo too large" });
+  });
+
+  test("happy path: uploads, then GET serves the exact bytes back with the right content-type", async () => {
+    const rowId = await seedRow();
+    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const uploadRes = await fetchHandler(photoUploadRequest(rowId, new Blob([bytes], { type: "image/jpeg" })));
+    expect(uploadRes.status).toBe(201);
+    const { id, url } = (await uploadRes.json()) as { id: string; url: string };
+    expect(url).toBe(`/api/ap/photos/${id}`);
+
+    const getRes = await fetchHandler(devRequest(url));
+    expect(getRes.status).toBe(200);
+    expect(getRes.headers.get("content-type")).toBe("image/jpeg");
+    expect(Array.from(new Uint8Array(await getRes.arrayBuffer()))).toEqual(Array.from(bytes));
+  });
+
+  test("the row's GET /api/ap/rows response embeds the photo under the same url", async () => {
+    const rowId = await seedRow();
+    const uploadRes = await fetchHandler(
+      photoUploadRequest(rowId, new Blob([new Uint8Array([9])], { type: "image/png" })),
+    );
+    const { id } = (await uploadRes.json()) as { id: string };
+
+    const listRes = await fetchHandler(devRequest("/api/ap/rows?f=all"));
+    const body = (await listRes.json()) as { rows: { id: string; photos: { id: string; url: string }[] }[] };
+    const row = body.rows.find((r) => r.id === rowId)!;
+    expect(row.photos).toEqual([{ id, url: `/api/ap/photos/${id}` }]);
+  });
+
+  test("GET /api/ap/photos/:photoId 404s a bogus/nonexistent id — cannot escape the storage dir", async () => {
+    const res = await fetchHandler(devRequest("/api/ap/photos/does-not-exist"));
+    expect(res.status).toBe(404);
+  });
+
+  test("DELETE /api/ap/rows/:id/photos/:photoId removes it — a subsequent GET 404s", async () => {
+    const rowId = await seedRow();
+    const uploadRes = await fetchHandler(
+      photoUploadRequest(rowId, new Blob([new Uint8Array([1])], { type: "image/jpeg" })),
+    );
+    const { id, url } = (await uploadRes.json()) as { id: string; url: string };
+
+    const deleteRes = await fetchHandler(devRequest(`/api/ap/rows/${rowId}/photos/${id}`, { method: "DELETE" }));
+    expect(deleteRes.status).toBe(204);
+
+    const getRes = await fetchHandler(devRequest(url));
+    expect(getRes.status).toBe(404);
+  });
+
+  test("DELETE 404s an unknown photo id", async () => {
+    const rowId = await seedRow();
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${rowId}/photos/does-not-exist`, { method: "DELETE" }));
+    expect(res.status).toBe(404);
+  });
+
+  test("DELETE 404s a photo id that exists but under a DIFFERENT row", async () => {
+    const rowId = await seedRow();
+    const otherRowId = await seedRow();
+    const uploadRes = await fetchHandler(
+      photoUploadRequest(rowId, new Blob([new Uint8Array([1])], { type: "image/jpeg" })),
+    );
+    const { id } = (await uploadRes.json()) as { id: string };
+
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${otherRowId}/photos/${id}`, { method: "DELETE" }));
+    expect(res.status).toBe(404);
+  });
+
+  test("row delete (zero-payment rule) removes both the DB rows and the files from disk", async () => {
+    const rowId = await seedRow();
+    const uploadRes = await fetchHandler(
+      photoUploadRequest(rowId, new Blob([new Uint8Array([1, 2])], { type: "image/jpeg" })),
+    );
+    const { id } = (await uploadRes.json()) as { id: string };
+    const filePath = apStore._apPhotoFilePathForTests(rowId, id, "jpg");
+    expect(existsSync(filePath)).toBe(true);
+
+    const deleteRowRes = await fetchHandler(devRequest(`/api/ap/rows/${rowId}`, { method: "DELETE" }));
+    expect(deleteRowRes.status).toBe(204);
+
+    expect(apStore.getApPhotoRecord(id)).toBeNull();
+    expect(existsSync(filePath)).toBe(false);
+
+    const getRes = await fetchHandler(devRequest(`/api/ap/photos/${id}`));
+    expect(getRes.status).toBe(404);
+  });
+
+  test("row delete with zero photos never touches the (nonexistent) photo directory", async () => {
+    const rowId = await seedRow();
+    const res = await fetchHandler(devRequest(`/api/ap/rows/${rowId}`, { method: "DELETE" }));
+    expect(res.status).toBe(204);
+  });
+});

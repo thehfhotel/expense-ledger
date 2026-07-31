@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  apPhotoUrl,
+  apRowPhotoCount,
   apTagName,
   buildApPaymentComment,
   computeGross,
@@ -212,5 +214,25 @@ describe("buildApPaymentComment", () => {
     expect(buildApPaymentComment("การไฟฟ้า", "ค่าไฟฟ้า มิ.ย.", "installment", 2)).toBe(
       "การไฟฟ้า - ค่าไฟฟ้า มิ.ย. (งวดที่ 2)",
     );
+  });
+});
+
+describe("apPhotoUrl", () => {
+  test("builds the stable GET /api/ap/photos/:photoId path", () => {
+    expect(apPhotoUrl("abc-123")).toBe("/api/ap/photos/abc-123");
+  });
+});
+
+describe("apRowPhotoCount — the register row's photo-count indicator (spec: show only when > 0)", () => {
+  test("null (render nothing) for a row with zero photos", () => {
+    expect(apRowPhotoCount([])).toBeNull();
+  });
+
+  test("the count for a row with one photo", () => {
+    expect(apRowPhotoCount([{ id: "p1" }])).toBe(1);
+  });
+
+  test("the count for a row with several photos", () => {
+    expect(apRowPhotoCount([{ id: "p1" }, { id: "p2" }, { id: "p3" }])).toBe(3);
   });
 });

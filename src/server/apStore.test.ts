@@ -7,20 +7,29 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AP_PHOTO_MAX_BYTES,
   ApRowHasPaymentsError,
+  _apPhotoFilePathForTests,
   _getDbForTests,
   _migrateCategoryCodeNullableForTests,
   _resetForTests,
   addApPayment,
   computeApSummary,
+  contentTypeForApPhotoExt,
+  createApPhoto,
   createApRow,
   deleteApPayment,
+  deleteApPhoto,
+  deleteApPhotoFile,
+  deleteApPhotoRowDir,
   deleteApRow,
+  extForApPhotoContentType,
   getApPayment,
+  getApPhotoRecord,
   getApRow,
   listApRows,
   listCreditorHints,
@@ -490,5 +499,146 @@ describe("L3 fix: a throwing migration restores the pragma and doesn't leak the 
     } finally {
       closeSpy.mockRestore();
     }
+  });
+});
+
+describe("AP row photos", () => {
+  function jpegBlob(bytes = 16): Blob {
+    return new Blob([new Uint8Array(bytes)], { type: "image/jpeg" });
+  }
+
+  describe("content-type <-> ext allow-list", () => {
+    test("accepts jpeg/png/webp/heic and strips a boundary-style parameter", () => {
+      expect(extForApPhotoContentType("image/jpeg")).toBe("jpg");
+      expect(extForApPhotoContentType("image/png")).toBe("png");
+      expect(extForApPhotoContentType("image/webp")).toBe("webp");
+      expect(extForApPhotoContentType("image/heic")).toBe("heic");
+      expect(extForApPhotoContentType("IMAGE/JPEG; charset=binary")).toBe("jpg");
+    });
+
+    test("rejects anything off the allow-list", () => {
+      expect(extForApPhotoContentType("application/pdf")).toBeNull();
+      expect(extForApPhotoContentType("text/plain")).toBeNull();
+      expect(extForApPhotoContentType("image/heif")).toBeNull();
+    });
+
+    test("contentTypeForApPhotoExt is the inverse for every allowed ext", () => {
+      expect(contentTypeForApPhotoExt("jpg")).toBe("image/jpeg");
+      expect(contentTypeForApPhotoExt("png")).toBe("image/png");
+      expect(contentTypeForApPhotoExt("webp")).toBe("image/webp");
+      expect(contentTypeForApPhotoExt("heic")).toBe("image/heic");
+    });
+
+    test("an unknown ext falls back to a generic binary content-type rather than throwing", () => {
+      expect(contentTypeForApPhotoExt("bogus")).toBe("application/octet-stream");
+    });
+  });
+
+  test("createApPhoto writes the file to disk AND inserts a DB row a subsequent lookup finds", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    const record = await createApPhoto(rowId, {
+      ext: "jpg",
+      size: 16,
+      createdBy: "clerk@thehfhotel.org",
+      data: jpegBlob(),
+    });
+
+    expect(record.rowId).toBe(rowId);
+    expect(existsSync(_apPhotoFilePathForTests(rowId, record.id, "jpg"))).toBe(true);
+
+    const found = getApPhotoRecord(record.id);
+    expect(found).not.toBeNull();
+    expect(found!.ext).toBe("jpg");
+    expect(found!.size).toBe(16);
+    expect(found!.createdBy).toBe("clerk@thehfhotel.org");
+  });
+
+  test("the row's photos come back embedded on GET, oldest first", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    const first = await createApPhoto(rowId, { ext: "jpg", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) });
+    const second = await createApPhoto(rowId, { ext: "png", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) });
+
+    const row = getApRow(rowId)!;
+    expect(row.photos.map((p) => p.id)).toEqual([first.id, second.id]);
+    expect(row.photos[0]!.url).toBe(`/api/ap/photos/${first.id}`);
+  });
+
+  test("getApPhotoRecord returns null for a bogus/nonexistent id — the ONLY lookup path GET ever uses", () => {
+    expect(getApPhotoRecord("does-not-exist")).toBeNull();
+    // Even a traversal-shaped id is just a DB key here, never a path — see
+    // apStore.ts's "AP row photos" doc comment.
+    expect(getApPhotoRecord("../../../../etc/passwd")).toBeNull();
+  });
+
+  test("deleteApPhoto removes exactly the (rowId, photoId) pair's DB row and returns it, but leaves the file untouched", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    const record = await createApPhoto(rowId, { ext: "jpg", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) });
+
+    const deleted = deleteApPhoto(rowId, record.id);
+    expect(deleted?.id).toBe(record.id);
+    expect(getApPhotoRecord(record.id)).toBeNull();
+    // apStore.deleteApPhoto is DB-only by design — the caller
+    // (src/server/server.ts) removes the file via deleteApPhotoFile.
+    expect(existsSync(_apPhotoFilePathForTests(rowId, record.id, "jpg"))).toBe(true);
+  });
+
+  test("deleteApPhoto returns null for the wrong row scoping (same photo id, different row)", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    const otherRowId = createApRow(baseRowInput({ creditor: "Other Co" }), "clerk@thehfhotel.org");
+    const record = await createApPhoto(rowId, { ext: "jpg", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) });
+
+    expect(deleteApPhoto(otherRowId, record.id)).toBeNull();
+    expect(getApPhotoRecord(record.id)).not.toBeNull();
+  });
+
+  test("deleteApPhotoFile removes the file from disk, and is a no-op (never throws) when it's already gone", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    const record = await createApPhoto(rowId, { ext: "jpg", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) });
+    const path = _apPhotoFilePathForTests(rowId, record.id, "jpg");
+    expect(existsSync(path)).toBe(true);
+
+    await deleteApPhotoFile(record);
+    expect(existsSync(path)).toBe(false);
+
+    // Second call: file already gone — must not throw.
+    await expect(deleteApPhotoFile(record)).resolves.toBeUndefined();
+  });
+
+  test("deleteApPhotoRowDir removes every photo file under a row, recursively, and cascades the DB rows via the ap_row foreign key", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    const a = await createApPhoto(rowId, { ext: "jpg", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) });
+    const b = await createApPhoto(rowId, { ext: "png", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) });
+
+    deleteApRow(rowId); // zero payments — allowed; cascades ap_photo DB rows
+    expect(getApPhotoRecord(a.id)).toBeNull();
+    expect(getApPhotoRecord(b.id)).toBeNull();
+    expect(existsSync(_apPhotoFilePathForTests(rowId, a.id, "jpg"))).toBe(true); // files: caller's job
+    expect(existsSync(_apPhotoFilePathForTests(rowId, b.id, "png"))).toBe(true);
+
+    await deleteApPhotoRowDir(rowId);
+    expect(existsSync(_apPhotoFilePathForTests(rowId, a.id, "jpg"))).toBe(false);
+    expect(existsSync(_apPhotoFilePathForTests(rowId, b.id, "png"))).toBe(false);
+  });
+
+  test("deleteApPhotoRowDir on a row that never had any photos is a silent no-op", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    await expect(deleteApPhotoRowDir(rowId)).resolves.toBeUndefined();
+  });
+
+  test("createApPhoto compensates by deleting the just-written file when the DB insert fails (row deleted concurrently)", async () => {
+    const rowId = createApRow(baseRowInput(), "clerk@thehfhotel.org");
+    deleteApRow(rowId); // row now gone -> the FK insert below must fail
+
+    await expect(
+      createApPhoto(rowId, { ext: "jpg", size: 1, createdBy: "a@thehfhotel.org", data: jpegBlob(1) }),
+    ).rejects.toThrow();
+
+    // No orphan file left behind after the compensating cleanup.
+    const dir = join(tmpDir, "ap-photos", rowId);
+    expect(existsSync(dir) ? readdirSync(dir).length : 0).toBe(0);
+  });
+
+  test("AP_PHOTO_MAX_BYTES is 10 MiB", () => {
+    expect(AP_PHOTO_MAX_BYTES).toBe(10 * 1024 * 1024);
   });
 });

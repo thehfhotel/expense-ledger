@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { createApRow, deleteApPayment, deleteApRow, EngineUnreachableError, SessionExpiredError, updateApRow } from "../api.ts";
+import {
+  createApRow,
+  deleteApPayment,
+  deleteApPhoto,
+  deleteApRow,
+  EngineUnreachableError,
+  SessionExpiredError,
+  updateApRow,
+  uploadApPhoto,
+} from "../api.ts";
 import { categoryByCode, type ExpenseCategoryCode } from "../../shared/categories.ts";
 import { isoToBuddhist, isoToThaiLong } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
@@ -12,8 +21,10 @@ import {
   type ApRow,
   type ApRowInput,
 } from "../../shared/apTypes.ts";
+import type { ExpensePhoto } from "../../shared/types.ts";
 import { CategoryPicker } from "./CategoryPicker.tsx";
 import { ApPaymentForm } from "./ApPaymentForm.tsx";
+import { PhotoLightbox } from "./PhotoLightbox.tsx";
 import {
   AP,
   AP_ENTITIES,
@@ -22,6 +33,7 @@ import {
   AP_VALIDATION,
   EDIT_DRAWER,
   ENGINE_ERROR,
+  PHOTO,
   SAVE,
   VALIDATION,
 } from "../labels.ts";
@@ -97,6 +109,21 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
 
   const [showPaymentForm, setShowPaymentForm] = useState(false);
   const [postedNotice, setPostedNotice] = useState<string | null>(null);
+
+  // รูปบิล (spec: photos are independent of payment state, upload never
+  // blocks row save). ADD mode (row === null) stages files locally and
+  // uploads them only AFTER the row itself is durably created — mirrors
+  // EntryPage's stagedPhotos pattern. EDIT mode (row !== null) uploads
+  // straight against the existing row id and shows the server's own
+  // photos — mirrors EditDrawer's photos pattern. Only one of the two
+  // arrays is ever active for a given drawer instance (add vs edit never
+  // switches mid-session).
+  const [stagedPhotos, setStagedPhotos] = useState<File[]>([]);
+  const [photos, setPhotos] = useState<ExpensePhoto[]>(row?.photos ?? []);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   const creditorInputRef = useRef<HTMLInputElement>(null);
   const amountInputRef = useRef<HTMLInputElement>(null);
@@ -224,8 +251,25 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     };
 
     try {
-      if (row) await updateApRow(row.id, input);
-      else await createApRow(input);
+      if (row) {
+        await updateApRow(row.id, input);
+      } else {
+        const { id } = await createApRow(input);
+        // Photo attach-after-save (mirrors EntryPage's identical resilience
+        // rule): the row is already durable the moment createApRow resolves
+        // — a staged photo failing to upload never undoes it, and never
+        // blocks onSaved() below. No retry affordance here (unlike
+        // EntryPage, this drawer closes right after a successful save) —
+        // the clerk can just reopen the row to try attaching it again.
+        for (const file of stagedPhotos) {
+          try {
+            await uploadApPhoto(id, file, file.name);
+          } catch (err) {
+            if (err instanceof SessionExpiredError) break;
+            console.error("[ap-row-drawer] staged photo upload failed after row save", err);
+          }
+        }
+      }
       onSaved();
     } catch (err) {
       if (err instanceof SessionExpiredError) return;
@@ -277,6 +321,50 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     }
   }
 
+  function addStagedFiles(files: FileList | File[] | null) {
+    if (!files) return;
+    const list = Array.from(files);
+    if (list.length > 0) setStagedPhotos((prev) => [...prev, ...list]);
+  }
+
+  async function handleAddFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    if (row === null) {
+      addStagedFiles(files);
+      return;
+    }
+    setPhotoBusy(true);
+    setPhotoError(null);
+    for (const file of Array.from(files)) {
+      try {
+        const uploaded = await uploadApPhoto(row.id, file, file.name);
+        setPhotos((prev) => [...prev, uploaded]);
+      } catch (err) {
+        if (err instanceof SessionExpiredError) break;
+        if (err instanceof Error && err.message === "photo too large") setPhotoError(AP_VALIDATION.photoTooLarge);
+        else if (err instanceof Error && err.message === "unsupported photo type") {
+          setPhotoError(AP_VALIDATION.photoUnsupportedType);
+        } else setPhotoError(ENGINE_ERROR.message);
+      }
+    }
+    setPhotoBusy(false);
+  }
+
+  async function handleRemovePhoto(photoId: string) {
+    if (!row) return;
+    if (!window.confirm(EDIT_DRAWER.confirmDelete)) return;
+    setPhotoBusy(true);
+    setPhotoError(null);
+    try {
+      await deleteApPhoto(row.id, photoId);
+      setPhotos((prev) => prev.filter((p) => p.id !== photoId));
+    } catch (err) {
+      if (!(err instanceof SessionExpiredError)) setPhotoError(ENGINE_ERROR.message);
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
+
   const heading = row ? row.creditor : AP.add;
   const canDelete = row !== null && row.payments.length === 0;
 
@@ -289,7 +377,10 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
         aria-label={heading}
       >
         <div className="border-b border-line px-4 py-3">
-          <h2 className="truncate text-sm font-semibold text-ink">{heading}</h2>
+          {/* Owner rule: ชื่อเจ้าหนี้ must always be fully readable — wraps to
+              multiple lines instead of clipping (no `truncate`), same as the
+              register's own grid/card rows. */}
+          <h2 className="break-words text-sm font-semibold text-ink">{heading}</h2>
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3">
@@ -547,6 +638,71 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                 className="w-full rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/40"
               />
             </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs font-semibold text-ink-muted">{AP_FIELDS.photos}</label>
+              <input
+                ref={photoInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  void handleAddFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              {row === null
+                ? stagedPhotos.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      {stagedPhotos.map((file, index) => (
+                        <div key={`${file.name}-${index}`} className="flex flex-col items-center gap-1">
+                          <img
+                            src={URL.createObjectURL(file)}
+                            alt=""
+                            className="h-16 w-16 rounded-md border border-line object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setStagedPhotos((prev) => prev.filter((_, i) => i !== index))}
+                            className="text-xs text-bad hover:underline"
+                          >
+                            {PHOTO.remove}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                : photos.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      {photos.map((photo) => (
+                        <div key={photo.id} className="flex flex-col items-center gap-1">
+                          <button type="button" onClick={() => setLightboxUrl(photo.url)}>
+                            <img src={photo.url} alt="" className="h-16 w-16 rounded-md border border-line object-cover" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRemovePhoto(photo.id)}
+                            disabled={photoBusy}
+                            className="text-xs text-bad hover:underline disabled:opacity-50"
+                          >
+                            {PHOTO.remove}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+              <button
+                type="button"
+                onClick={() => photoInputRef.current?.click()}
+                disabled={photoBusy}
+                className="h-11 rounded-md border border-line-strong bg-panel px-4 text-sm font-medium text-ink hover:bg-tint focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:opacity-50"
+              >
+                {PHOTO.choose}
+              </button>
+              {photoError && <p className="mt-1 text-xs text-bad">{photoError}</p>}
+            </div>
           </div>
         </div>
 
@@ -601,6 +757,8 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
           }}
         />
       )}
+
+      {lightboxUrl && <PhotoLightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </div>
   );
 }

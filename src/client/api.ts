@@ -160,3 +160,16 @@ export function createApPayment(rowId: string, input: ApPaymentInput): Promise<C
 export function deleteApPayment(rowId: string, paymentId: string): Promise<void> {
   return api(`/ap/rows/${rowId}/payments/${paymentId}`, { method: "DELETE" });
 }
+
+/** Uploads a รูปบิล (bill/invoice photo) for an AP row — same "picture"
+ * multipart field convention as uploadExpensePhoto above, independent of
+ * that row's payment state. */
+export function uploadApPhoto(rowId: string, file: Blob, filename: string): Promise<UploadPhotoResponse> {
+  const form = new FormData();
+  form.append("picture", file, filename);
+  return api(`/ap/rows/${rowId}/photos`, { method: "POST", body: form });
+}
+
+export function deleteApPhoto(rowId: string, photoId: string): Promise<void> {
+  return api(`/ap/rows/${rowId}/photos/${photoId}`, { method: "DELETE" });
+}

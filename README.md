@@ -231,7 +231,11 @@ not-yet-addressed follow-up outside this repo.)*
   holds creditor/due-date/payment-history bookkeeping that has no
   ezBookkeeping equivalent — losing it would lose the register even though
   every posted payment is still separately recoverable from the engine's own
-  transaction history (see "AP register reconciliation" below).
+  transaction history (see "AP register reconciliation" below). This same
+  volume also holds every AP row's own รูปบิล (bill/invoice photos) under
+  `/app/data/ap-photos/<rowId>/<photoId>.<ext>` — the whole-directory `tar`
+  above already covers them alongside `ap.db`, no separate backup step
+  needed.
 
 Restoring either volume: stop the affected container, extract the chosen
 archive over the volume's data directory (`docker run --rm -v

@@ -18,6 +18,7 @@ import { attributedCommentLength, ENGINE_COMMENT_MAX_RUNES } from "./attribution
 import { EXPENSE_CATEGORIES, isExpenseCategoryCode, type ExpenseCategoryCode } from "../shared/categories.ts";
 import { currentMonthBangkok, isValidIso, isValidMonth, todayBangkok } from "../shared/date.ts";
 import {
+  apPhotoUrl,
   computeGross,
   computeOutstanding,
   derivePaymentKind,
@@ -688,7 +689,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
 
     if (method === "DELETE") {
       return withApWriteLock(() =>
-        withApStore(() => {
+        withApStore(async () => {
           const existing = apStore.getApRow(id);
           if (!existing) return json(404, { error: "not found" });
           try {
@@ -697,6 +698,10 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
             if (err instanceof apStore.ApRowHasPaymentsError) return json(409, { error: "has_payments" });
             throw err;
           }
+          // The DB's ap_photo rows are already gone (ON DELETE CASCADE via
+          // ap_row's foreign key) — this only removes the FILES, recursively,
+          // for whatever photos (zero or more) this row had.
+          await apStore.deleteApPhotoRowDir(id);
           return new Response(null, { status: 204 });
         }),
       );
@@ -876,6 +881,86 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
         return new Response(null, { status: 204 });
       }),
     );
+  }
+
+  // ── AP row photos ("รูปบิล") ─────────────────────────────────────────
+  // Bill/invoice photos attached to an AP row — independent of payment
+  // state (a row can carry photos whether it has zero payments or is fully
+  // settled). Storage: src/server/apStore.ts's ap_photo table + a sibling
+  // filesystem directory on the SAME expense_ap volume.
+  //
+  // Deliberately NOT gated by unsupportedMediaTypeResponse (the JSON-only
+  // 415 guard every other write route above uses) — the upload route's body
+  // is multipart/form-data, exactly like the existing
+  // POST /api/expenses/:id/photo route. Deliberately NOT wrapped in
+  // withApWriteLock either: unlike a payment, a photo attach/detach never
+  // reads or reasons about outstanding/gross, so two concurrent uploads
+  // against the same row carry no double-booking risk — the worst case (the
+  // row is deleted mid-upload) is a foreign-key failure on insert, caught by
+  // withApStore below same as any other local-store failure.
+
+  const apPhotoUploadMatch = path.match(/^\/ap\/rows\/([^/]+)\/photos$/);
+  if (method === "POST" && apPhotoUploadMatch) {
+    const rowId = apPhotoUploadMatch[1]!;
+    return withApStore(async () => {
+      const row = apStore.getApRow(rowId);
+      if (!row) return json(404, { error: "not found" });
+
+      // Cheap pre-parse rejection when the client sent a real Content-Length
+      // (a locally-constructed test Request has none — the post-parse
+      // file.size check below is what actually guards every case).
+      const contentLength = Number(req.headers.get("content-length") ?? "0");
+      if (contentLength > apStore.AP_PHOTO_MAX_BYTES) return json(413, { error: "photo too large" });
+
+      let form: FormData;
+      try {
+        form = await req.formData();
+      } catch {
+        return json(400, { error: "invalid multipart body" });
+      }
+      const file = form.get("picture");
+      if (!(file instanceof Blob)) return json(400, { error: "missing picture field" });
+      if (file.size > apStore.AP_PHOTO_MAX_BYTES) return json(413, { error: "photo too large" });
+
+      const ext = apStore.extForApPhotoContentType(file.type);
+      if (!ext) return json(415, { error: "unsupported photo type" });
+
+      const photo = await apStore.createApPhoto(rowId, {
+        ext,
+        size: file.size,
+        createdBy: identity.email,
+        data: file,
+      });
+      return json(201, { id: photo.id, url: apPhotoUrl(photo.id) });
+    });
+  }
+
+  const apPhotoGetMatch = path.match(/^\/ap\/photos\/([^/]+)$/);
+  if (method === "GET" && apPhotoGetMatch) {
+    const photoId = apPhotoGetMatch[1]!;
+    return withApStore(async () => {
+      // The path served below is resolved ONLY through this DB lookup —
+      // photoId from the URL is used exclusively as a `WHERE id = ?` key,
+      // never concatenated into a filesystem path, so a bogus/traversal-
+      // shaped id simply matches no row (404), never escapes the storage
+      // dir (see apStore.ts's "AP row photos" section doc comment).
+      const record = apStore.getApPhotoRecord(photoId);
+      if (!record) return json(404, { error: "not found" });
+      const file = apStore.apPhotoFile(record);
+      if (!(await file.exists())) return json(404, { error: "not found" });
+      return new Response(file, { headers: { "content-type": apStore.contentTypeForApPhotoExt(record.ext) } });
+    });
+  }
+
+  const apPhotoDeleteMatch = path.match(/^\/ap\/rows\/([^/]+)\/photos\/([^/]+)$/);
+  if (method === "DELETE" && apPhotoDeleteMatch) {
+    const [, rowId, photoId] = apPhotoDeleteMatch as unknown as [string, string, string];
+    return withApStore(async () => {
+      const record = apStore.deleteApPhoto(rowId, photoId);
+      if (!record) return json(404, { error: "not found" });
+      await apStore.deleteApPhotoFile(record);
+      return new Response(null, { status: 204 });
+    });
   }
 
   return json(404, { error: "not found" });

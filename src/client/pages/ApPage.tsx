@@ -5,6 +5,7 @@ import { currentMonthBangkok, isoToBuddhist, monthToThaiLong, shiftMonths, today
 import { formatSatang } from "../../shared/money.ts";
 import { categoryByCode } from "../../shared/categories.ts";
 import {
+  apRowPhotoCount,
   deriveStatus,
   statusRank,
   type ApListFilter,
@@ -296,18 +297,32 @@ export function ApPage({ filter }: Props) {
                       }
                     }}
                     className={
-                      "relative grid cursor-pointer items-center gap-2 px-4 py-2 text-sm hover:bg-tint focus:outline-none focus:ring-2 focus:ring-inset focus:ring-brand-500/40 " +
+                      "relative grid cursor-pointer items-start gap-2 px-4 py-2 text-sm hover:bg-tint focus:outline-none focus:ring-2 focus:ring-inset focus:ring-brand-500/40 " +
                       REGISTER_COLUMNS +
                       (isOverdue ? " bg-bad/5" : "") +
                       (highlightId === row.id ? " bg-gold-100" : "")
                     }
                   >
                     {isOverdue && <span className="absolute inset-y-0 left-0 w-0.5 bg-bad" aria-hidden="true" />}
-                    <span className="min-w-0 truncate text-ink">{row.creditor}</span>
-                    <span className="min-w-0 text-ink" title={row.item}>
-                      <span className="block truncate">{row.item}</span>
-                      <span className="mt-0.5 inline-block truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
-                        {categoryChipLabel(row)}
+                    {/* Owner rule: ชื่อเจ้าหนี้/รายการ must always be fully
+                        readable — wraps to multiple lines instead of
+                        clipping (no `truncate`); the row grows to fit, never
+                        a horizontal scroll (the ENGINE COMMENT's own
+                        255-rune upstream cap is unaffected — see
+                        src/server/attribution.ts — this register row stays
+                        the full-text source of truth regardless). */}
+                    <span className="min-w-0 break-words text-ink">{row.creditor}</span>
+                    <span className="min-w-0 text-ink">
+                      <span className="block break-words">{row.item}</span>
+                      <span className="mt-0.5 flex flex-wrap items-center gap-1">
+                        <span className="inline-block truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
+                          {categoryChipLabel(row)}
+                        </span>
+                        {apRowPhotoCount(row.photos) !== null && (
+                          <span className="inline-block truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
+                            {AP_FIELDS.photoCount(apRowPhotoCount(row.photos)!)}
+                          </span>
+                        )}
                       </span>
                     </span>
                     <span className={"text-right tabular-nums font-semibold " + (isOverdue ? "text-bad" : "text-ink")}>
@@ -378,16 +393,25 @@ export function ApPage({ filter }: Props) {
                   }
                 >
                   {isOverdue && <span className="absolute inset-y-0 left-0 w-0.5 bg-bad" aria-hidden="true" />}
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="min-w-0 truncate font-medium text-ink">{row.creditor}</span>
+                  {/* Owner rule — see the desktop grid's identical comment
+                      above: ชื่อเจ้าหนี้/รายการ never clip, they wrap. */}
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="min-w-0 break-words font-medium text-ink">{row.creditor}</span>
                     <span className={"shrink-0 tabular-nums font-semibold " + (isOverdue ? "text-bad" : "text-ink")}>
                       ฿{formatSatang(row.outstandingSatang)}
                     </span>
                   </div>
-                  <span className="truncate text-xs text-ink-muted">{row.item}</span>
-                  <span className="inline-block w-fit truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
-                    {categoryChipLabel(row)}
-                  </span>
+                  <span className="break-words text-xs text-ink-muted">{row.item}</span>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className="inline-block w-fit truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
+                      {categoryChipLabel(row)}
+                    </span>
+                    {apRowPhotoCount(row.photos) !== null && (
+                      <span className="inline-block w-fit truncate rounded-full border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-muted">
+                        {AP_FIELDS.photoCount(apRowPhotoCount(row.photos)!)}
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs text-ink-muted">
                       {row.dueDate ? isoToBuddhist(row.dueDate) : EMPTY_VALUE}

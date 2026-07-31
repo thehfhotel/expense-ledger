@@ -11,13 +11,22 @@
 // the filesystem for this store. A missing volume directory is created on
 // demand, matching the engine-init pattern already used for the engine's own
 // storage path (see docker-compose.yml).
+//
+// This module ALSO owns the register's bill/invoice photo storage (the
+// "AP row photos" section near the bottom) — a sibling filesystem directory
+// next to this same ap.db, on the SAME expense_ap volume, never a second
+// volume/env var of its own. That's still within the "AP register storage
+// exception" this file's header already documents: one register, one
+// storage module, one volume.
 
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { ExpenseCategoryCode } from "../shared/categories.ts";
 import { todayBangkok } from "../shared/date.ts";
 import {
+  apPhotoUrl,
   computeGross,
   computeOutstanding,
   deriveSettledAt,
@@ -30,7 +39,7 @@ import {
   type ApRowInput,
   type ApSummary,
 } from "../shared/apTypes.ts";
-import type { PaymentMethod } from "../shared/types.ts";
+import type { ExpensePhoto, PaymentMethod } from "../shared/types.ts";
 
 const DEFAULT_DB_PATH = "/app/data/ap.db";
 
@@ -170,6 +179,25 @@ function openDb(path: string): Database {
       );
     `);
     db.exec("CREATE INDEX IF NOT EXISTS idx_ap_payment_row_id ON ap_payment(row_id);");
+    // Bill/invoice photos (see the "AP row photos" section below). Purely
+    // ADDITIVE — unlike migrateCategoryCodeNullable above (which had to
+    // rebuild ap_row because it narrowed an EXISTING column's constraint),
+    // a brand-new table needs no rebuild/rename dance: `CREATE TABLE IF NOT
+    // EXISTS` is already idempotent/safe on both a pre-existing volume (it
+    // just gains the new, empty table on next boot) and a fresh one alike.
+    // ON DELETE CASCADE relies on the `PRAGMA foreign_keys = ON` already set
+    // above, exactly like ap_payment's own FK.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ap_photo (
+        id TEXT PRIMARY KEY,
+        row_id TEXT NOT NULL REFERENCES ap_row(id) ON DELETE CASCADE,
+        ext TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL
+      );
+    `);
+    db.exec("CREATE INDEX IF NOT EXISTS idx_ap_photo_row_id ON ap_photo(row_id);");
     return db;
   } catch (err) {
     // L3 fix: never leak an open file handle when initialization fails
@@ -274,6 +302,16 @@ function loadPayments(db: Database, rowId: string): ApPayment[] {
   return raw.map(mapPayment);
 }
 
+/** The row's photo IDs, oldest first, mapped straight to the wire
+ * `{id, url}` shape — see apPhotoUrl's doc comment for why the URL is
+ * derived here rather than stored. */
+function loadPhotos(db: Database, rowId: string): ExpensePhoto[] {
+  const raw = db.query("SELECT id FROM ap_photo WHERE row_id = ? ORDER BY created_at ASC").all(rowId) as {
+    id: string;
+  }[];
+  return raw.map((r) => ({ id: r.id, url: apPhotoUrl(r.id) }));
+}
+
 function mapRow(db: Database, raw: RawRow): ApRow {
   const payments = loadPayments(db, raw.id);
   const gross = computeGross(raw.amount_satang, raw.vat_satang, raw.wht_satang);
@@ -299,6 +337,7 @@ function mapRow(db: Database, raw: RawRow): ApRow {
     grossSatang: gross,
     outstandingSatang: outstanding,
     payments,
+    photos: loadPhotos(db, raw.id),
   };
 }
 
@@ -485,4 +524,175 @@ export function getApPayment(rowId: string, paymentId: string): ApPayment | null
 
 export function deleteApPayment(rowId: string, paymentId: string): void {
   getDb().query("DELETE FROM ap_payment WHERE id = ? AND row_id = ?").run(paymentId, rowId);
+}
+
+// ── AP row photos ("รูปบิล") ────────────────────────────────────────────
+// Bill/invoice photos attached to an AP row, independent of payments — a row
+// can carry photos in any payment state (open, dueSoon, overdue, settled).
+// Files live in a sibling directory to this store's own sqlite file —
+// <dirname of AP_DB_PATH>/ap-photos/<rowId>/<photoId>.<ext> by default —
+// still on the SAME expense_ap volume (no second volume/env var). The DB
+// row (id, ext, size, timestamps) is this store's source of truth for what
+// exists; src/server/server.ts's GET/DELETE routes always resolve a photoId
+// to a path THROUGH getApPhotoRecord/deleteApPhoto below, never from a
+// client-supplied path — there is no traversal surface, since rowId and
+// photoId are both server-generated crypto.randomUUID()s and ext is
+// restricted to a fixed allow-list (see extForApPhotoContentType).
+
+const PHOTO_DIR_NAME = "ap-photos";
+
+/** The register's own data directory — dirname of AP_DB_PATH — so photo
+ * storage always sits next to ap.db on the same volume with no second env
+ * var, and a test overriding AP_DB_PATH to a temp path automatically gets
+ * isolated photo storage too (same trick _resetForTests already relies on
+ * for the sqlite file itself). */
+function apDataDir(): string {
+  return dirname(dbPath());
+}
+
+function apPhotoRowDir(rowId: string): string {
+  return join(apDataDir(), PHOTO_DIR_NAME, rowId);
+}
+
+function apPhotoFilePath(rowId: string, photoId: string, ext: string): string {
+  return join(apPhotoRowDir(rowId), `${photoId}.${ext}`);
+}
+
+/** Validated content-type -> file extension allow-list. POST
+ * /api/ap/rows/:id/photos 415s anything not on this list; the inverse
+ * (contentTypeForApPhotoExt) drives what GET /api/ap/photos/:photoId serves
+ * a stored file back as, so a stored ext can never resolve to a type
+ * outside this same list either. */
+const CONTENT_TYPE_TO_EXT: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/heic": "heic",
+};
+
+/** Matches on the media type only (strips any `; boundary=...`-style
+ * parameter a multipart file part's content-type may carry). */
+export function extForApPhotoContentType(contentType: string): string | null {
+  const bare = contentType.toLowerCase().split(";")[0]!.trim();
+  return CONTENT_TYPE_TO_EXT[bare] ?? null;
+}
+
+export function contentTypeForApPhotoExt(ext: string): string {
+  const found = Object.entries(CONTENT_TYPE_TO_EXT).find(([, e]) => e === ext);
+  return found ? found[0] : "application/octet-stream";
+}
+
+/** 10 MiB — POST /api/ap/rows/:id/photos 413s over this. */
+export const AP_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+
+export interface ApPhotoRecord {
+  id: string;
+  rowId: string;
+  ext: string;
+  size: number;
+  createdAt: string;
+  createdBy: string;
+}
+
+interface RawPhoto {
+  id: string;
+  row_id: string;
+  ext: string;
+  size: number;
+  created_at: string;
+  created_by: string;
+}
+
+function mapPhotoRecord(raw: RawPhoto): ApPhotoRecord {
+  return {
+    id: raw.id,
+    rowId: raw.row_id,
+    ext: raw.ext,
+    size: raw.size,
+    createdAt: raw.created_at,
+    createdBy: raw.created_by,
+  };
+}
+
+/**
+ * Writes the uploaded bytes to disk FIRST, then inserts the DB row — so a
+ * failure in between (e.g. the row was deleted concurrently, tripping the
+ * `ap_row` foreign key) leaves at worst an orphan FILE, never a DB row
+ * pointing at a file that was never actually written. The orphan-file case
+ * is itself compensated below: if the insert throws, the just-written file
+ * is deleted before rethrowing, mirroring this codebase's existing
+ * compensating-cleanup pattern for the AP payment path (H4a fix in
+ * src/server/server.ts).
+ */
+export async function createApPhoto(
+  rowId: string,
+  input: { ext: string; size: number; createdBy: string; data: Blob },
+): Promise<ApPhotoRecord> {
+  const id = crypto.randomUUID();
+  const dir = apPhotoRowDir(rowId);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const filePath = apPhotoFilePath(rowId, id, input.ext);
+  await Bun.write(filePath, input.data);
+
+  const createdAt = new Date().toISOString();
+  try {
+    getDb()
+      .query(`INSERT INTO ap_photo (id, row_id, ext, size, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(id, rowId, input.ext, input.size, createdAt, input.createdBy);
+  } catch (err) {
+    await rm(filePath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+  return { id, rowId, ext: input.ext, size: input.size, createdAt, createdBy: input.createdBy };
+}
+
+/** Looks up a photo by id ALONE (GET /api/ap/rows/:photoId's route has no
+ * rowId segment) — see the module doc comment for why this is still
+ * traversal-safe. */
+export function getApPhotoRecord(photoId: string): ApPhotoRecord | null {
+  const raw = getDb().query("SELECT * FROM ap_photo WHERE id = ?").get(photoId) as RawPhoto | null;
+  return raw ? mapPhotoRecord(raw) : null;
+}
+
+/** Deletes exactly the (rowId, photoId) pair's DB row — same scoping as
+ * getApPayment/deleteApPayment above — and returns the deleted record (or
+ * null if no such photo exists under that row) so the caller
+ * (src/server/server.ts) can remove the underlying file; this function
+ * never touches the filesystem itself. */
+export function deleteApPhoto(rowId: string, photoId: string): ApPhotoRecord | null {
+  const db = getDb();
+  const raw = db.query("SELECT * FROM ap_photo WHERE id = ? AND row_id = ?").get(photoId, rowId) as RawPhoto | null;
+  if (!raw) return null;
+  db.query("DELETE FROM ap_photo WHERE id = ? AND row_id = ?").run(photoId, rowId);
+  return mapPhotoRecord(raw);
+}
+
+/** Deletes one photo's file from disk — best-effort (`force: true`), since
+ * by the time a caller reaches this the DB row is already gone either way;
+ * a missing file just means there was nothing left to clean up. */
+export async function deleteApPhotoFile(record: Pick<ApPhotoRecord, "rowId" | "id" | "ext">): Promise<void> {
+  await rm(apPhotoFilePath(record.rowId, record.id, record.ext), { force: true });
+}
+
+/** Removes an ENTIRE row's photo directory recursively — used when the row
+ * itself is deleted (the zero-payment delete rule already enforced by
+ * deleteApRow above; ap_photo's own DB rows are cascaded by the `ap_row`
+ * foreign key at delete time, this only cleans up the FILES). `force: true`
+ * makes a row that never had any photos (no directory ever created) a
+ * silent no-op rather than an error. */
+export async function deleteApPhotoRowDir(rowId: string): Promise<void> {
+  await rm(apPhotoRowDir(rowId), { recursive: true, force: true });
+}
+
+/** A Bun.file() handle for a photo's bytes — GET /api/ap/photos/:photoId
+ * checks `.exists()` before serving it (a DB row surviving a manually
+ * deleted file is treated as 404, not a crash). */
+export function apPhotoFile(record: Pick<ApPhotoRecord, "rowId" | "id" | "ext">) {
+  return Bun.file(apPhotoFilePath(record.rowId, record.id, record.ext));
+}
+
+/** Test-only seam: lets a test locate/write a photo file directly on disk
+ * without duplicating this module's path convention. */
+export function _apPhotoFilePathForTests(rowId: string, photoId: string, ext: string): string {
+  return apPhotoFilePath(rowId, photoId, ext);
 }

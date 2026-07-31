@@ -10,7 +10,7 @@
 
 import type { ExpenseCategoryCode } from "./categories.ts";
 import { shiftDays } from "./date.ts";
-import type { PaymentMethod } from "./types.ts";
+import type { ExpensePhoto, PaymentMethod } from "./types.ts";
 
 export type ApPaymentKind = "deposit" | "installment" | "full";
 
@@ -70,6 +70,12 @@ export interface ApRow {
   /** = grossSatang - Σ payments - discountSatang, computed server-side. */
   outstandingSatang: number;
   payments: ApPayment[];
+  /** Bill/invoice photos attached to this row (src/server/apStore.ts's
+   * ap_photo table) — independent of payment state, unlike `payments`. Same
+   * `{id, url}` wire shape as an ExpenseTransaction's own `photos` (the
+   * entry-page receipt photos), reused rather than duplicated since both
+   * are just "an id plus a URL the browser can GET the bytes from". */
+  photos: ExpensePhoto[];
 }
 
 export type ApFilterMode = "open" | "all" | "month";
@@ -304,4 +310,26 @@ export function buildApPaymentComment(
   installmentNumber: number | null,
 ): string {
   return `${creditor} - ${item}${paymentKindSuffix(kind, installmentNumber)}`;
+}
+
+// ── AP row photos ("รูปบิล") ────────────────────────────────────────────
+
+/** `/api/ap/photos/<id>` — the stable URL a photo's DB id resolves to via
+ * GET /api/ap/photos/:photoId (src/server/server.ts serves the bytes; the
+ * path is resolved ONLY through a DB lookup there, never from anything
+ * client-supplied). Shared so src/server/apStore.ts (building the
+ * ApRow.photos it returns) never drifts from the route that actually serves
+ * it. */
+export function apPhotoUrl(photoId: string): string {
+  return `/api/ap/photos/${photoId}`;
+}
+
+/** Whether — and what number — a register row's photo-count indicator
+ * should show: null means "render nothing" (spec: "small photo-count
+ * indicator when > 0", never a bare "0"). Pulled out as a pure function,
+ * matching this codebase's existing convention for UI decision logic (see
+ * resolveCreditorHintCategoryCode above) since there is no DOM/React test
+ * harness for the components themselves yet. */
+export function apRowPhotoCount(photos: readonly { id: string }[]): number | null {
+  return photos.length > 0 ? photos.length : null;
 }
