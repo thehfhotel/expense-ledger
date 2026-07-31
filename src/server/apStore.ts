@@ -26,6 +26,7 @@ import { dirname, join } from "node:path";
 import type { ExpenseCategoryCode } from "../shared/categories.ts";
 import { todayBangkok } from "../shared/date.ts";
 import {
+  apPhotoExtForFilename,
   apPhotoUrl,
   computeGross,
   computeOutstanding,
@@ -537,7 +538,7 @@ export function deleteApPayment(rowId: string, paymentId: string): void {
 // to a path THROUGH getApPhotoRecord/deleteApPhoto below, never from a
 // client-supplied path — there is no traversal surface, since rowId and
 // photoId are both server-generated crypto.randomUUID()s and ext is
-// restricted to a fixed allow-list (see extForApPhotoContentType).
+// restricted to a fixed allow-list (see extForApPhotoFilename).
 
 const PHOTO_DIR_NAME = "ap-photos";
 
@@ -558,28 +559,31 @@ function apPhotoFilePath(rowId: string, photoId: string, ext: string): string {
   return join(apPhotoRowDir(rowId), `${photoId}.${ext}`);
 }
 
-/** Validated content-type -> file extension allow-list. POST
- * /api/ap/rows/:id/photos 415s anything not on this list; the inverse
- * (contentTypeForApPhotoExt) drives what GET /api/ap/photos/:photoId serves
- * a stored file back as, so a stored ext can never resolve to a type
- * outside this same list either. */
-const CONTENT_TYPE_TO_EXT: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-  "image/heic": "heic",
+/** Canonical stored ext -> content-type served back by GET
+ * /api/ap/photos/:photoId. HEIC is deliberately NOT here (RULING 3, 2026-07,
+ * owner decision) — see apPhotoExtForFilename's doc comment (src/shared/
+ * apTypes.ts) for why, and for the upload-side half of this same allow-list. */
+const EXT_TO_CONTENT_TYPE: Record<string, string> = {
+  jpg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
 };
 
-/** Matches on the media type only (strips any `; boundary=...`-style
- * parameter a multipart file part's content-type may carry). */
-export function extForApPhotoContentType(contentType: string): string | null {
-  const bare = contentType.toLowerCase().split(";")[0]!.trim();
-  return CONTENT_TYPE_TO_EXT[bare] ?? null;
+/** POST /api/ap/rows/:id/photos's upload gate (BLOCKER 1 fix, 2026-07): this
+ * used to take the uploaded Blob's `file.type` and normalize it (lowercase +
+ * strip a `; boundary=...`-style parameter) — that normalization is now DEAD
+ * CODE, removed rather than kept around implying a trust this repo no longer
+ * extends. See src/shared/apTypes.ts's apPhotoExtForFilename (the actual
+ * allow-list logic, shared with the client's staging-time pre-check) for the
+ * full rationale: Bun's own multipart parsing silently discards whatever
+ * Content-Type the client declared, so this route now derives acceptance
+ * from the FILENAME src/server/server.ts passes in here instead. */
+export function extForApPhotoFilename(filename: string): string | null {
+  return apPhotoExtForFilename(filename);
 }
 
 export function contentTypeForApPhotoExt(ext: string): string {
-  const found = Object.entries(CONTENT_TYPE_TO_EXT).find(([, e]) => e === ext);
-  return found ? found[0] : "application/octet-stream";
+  return EXT_TO_CONTENT_TYPE[ext] ?? "application/octet-stream";
 }
 
 /** 10 MiB — POST /api/ap/rows/:id/photos 413s over this. */

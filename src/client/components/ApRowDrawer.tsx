@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createApRow,
   deleteApPayment,
@@ -13,6 +13,7 @@ import { categoryByCode, type ExpenseCategoryCode } from "../../shared/categorie
 import { isoToBuddhist, isoToThaiLong } from "../../shared/date.ts";
 import { formatSatang, parseAmountToSatang } from "../../shared/money.ts";
 import {
+  apPhotoExtForFilename,
   computeGross,
   computeOutstanding,
   resolveCreditorHintCategoryCode,
@@ -73,6 +74,12 @@ interface FieldErrors {
 const DUE_DATE_MIN = "2000-01-01";
 const DUE_DATE_MAX = "2100-12-31";
 
+/** BLOCKER 2 fix: mirrors the server's authoritative apStore.AP_PHOTO_MAX_BYTES
+ * (src/server/apStore.ts) — a cheap client-side pre-check at staging time so
+ * an oversized file surfaces immediately instead of only after Save. The
+ * server enforces the real cap regardless; this is a hint, not a guarantee. */
+const STAGED_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
+
 function paymentKindLabel(p: ApPayment): string {
   if (p.kind === "deposit") return AP_FIELDS.deposit;
   if (p.kind === "installment") return AP_FIELDS.installment(p.installmentNumber ?? 0);
@@ -124,6 +131,26 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
   const [photoError, setPhotoError] = useState<string | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
+
+  // BLOCKER 2 fix: once ADD mode's row is created, this holds its id — a
+  // staged photo failing to upload keeps the drawer open (see handleSave),
+  // and this is what the per-photo retry buttons upload against. Stays null
+  // in EDIT mode (row !== null already carries its own id) and before the
+  // first Save attempt in ADD mode.
+  const [createdRowId, setCreatedRowId] = useState<string | null>(null);
+
+  // Fold e fix: URL.createObjectURL was called inline in JSX, minting a new
+  // (never-revoked) blob URL on every render — including renders triggered
+  // by unrelated field edits. Memoized so it only regenerates when the
+  // staged list itself changes, with a matching cleanup effect that revokes
+  // the previous batch (and the final batch on unmount) — the standard
+  // create-object-url/revoke-on-cleanup pairing.
+  const stagedPhotoUrls = useMemo(() => stagedPhotos.map((file) => URL.createObjectURL(file)), [stagedPhotos]);
+  useEffect(() => {
+    return () => {
+      for (const url of stagedPhotoUrls) URL.revokeObjectURL(url);
+    };
+  }, [stagedPhotoUrls]);
 
   const creditorInputRef = useRef<HTMLInputElement>(null);
   const amountInputRef = useRef<HTMLInputElement>(null);
@@ -253,24 +280,19 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     try {
       if (row) {
         await updateApRow(row.id, input);
+        onSaved();
+      } else if (createdRowId) {
+        // BLOCKER 2 fix: a PREVIOUS Save already created the row and left
+        // >= 1 staged photo un-uploaded (that's the only way this branch is
+        // reachable — see below). Clicking Save again must retry those
+        // photos, never call createApRow a second time and duplicate the
+        // row.
+        await uploadRemainingStagedPhotos(createdRowId);
       } else {
         const { id } = await createApRow(input);
-        // Photo attach-after-save (mirrors EntryPage's identical resilience
-        // rule): the row is already durable the moment createApRow resolves
-        // — a staged photo failing to upload never undoes it, and never
-        // blocks onSaved() below. No retry affordance here (unlike
-        // EntryPage, this drawer closes right after a successful save) —
-        // the clerk can just reopen the row to try attaching it again.
-        for (const file of stagedPhotos) {
-          try {
-            await uploadApPhoto(id, file, file.name);
-          } catch (err) {
-            if (err instanceof SessionExpiredError) break;
-            console.error("[ap-row-drawer] staged photo upload failed after row save", err);
-          }
-        }
+        setCreatedRowId(id);
+        await uploadRemainingStagedPhotos(id);
       }
-      onSaved();
     } catch (err) {
       if (err instanceof SessionExpiredError) return;
       if (err instanceof Error && err.message === "negative outstanding") {
@@ -321,10 +343,101 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
     }
   }
 
+  /** BLOCKER 2 fix: attempts one staged photo's upload against the
+   * already-created row, never throwing — the caller (handleSave /
+   * retryStagedPhoto) decides what to do with each outcome. Distinguishing
+   * "session-expired" from a plain "failed" matters: a SessionExpiredError
+   * means the global overlay is already taking over, so the caller stops
+   * attempting further files rather than hammering a dead session. */
+  async function attemptStagedUpload(rowId: string, file: File): Promise<"ok" | "session-expired" | "failed"> {
+    try {
+      await uploadApPhoto(rowId, file, file.name);
+      return "ok";
+    } catch (err) {
+      if (err instanceof SessionExpiredError) return "session-expired";
+      console.error("[ap-row-drawer] staged photo upload failed", err);
+      return "failed";
+    }
+  }
+
+  /** BLOCKER 2 fix: attempts every currently-staged photo against an
+   * already-created row (used by handleSave, both on the row's FIRST save
+   * and on a subsequent Save click that's really just retrying whatever
+   * didn't upload the first time — see handleSave's `createdRowId` branch).
+   * Anything that doesn't succeed (an explicit failure, OR anything not yet
+   * attempted because a SessionExpiredError cut the loop short) stays
+   * staged and keeps the drawer OPEN with a per-photo retry affordance,
+   * instead of calling onSaved() (which would close it and lose this
+   * in-memory list for good). */
+  async function uploadRemainingStagedPhotos(rowId: string): Promise<void> {
+    const remaining: File[] = [];
+    let sessionExpired = false;
+    for (const file of stagedPhotos) {
+      if (sessionExpired) {
+        remaining.push(file);
+        continue;
+      }
+      const outcome = await attemptStagedUpload(rowId, file);
+      if (outcome !== "ok") remaining.push(file);
+      if (outcome === "session-expired") sessionExpired = true;
+    }
+    setStagedPhotos(remaining);
+    if (remaining.length > 0) {
+      setPhotoError(AP_VALIDATION.stagedPhotosNotUploaded(remaining.length));
+    } else {
+      onSaved();
+    }
+  }
+
+  /** Per-photo retry button (BLOCKER 2 fix) — mirrors EntryPage's
+   * photo-retry-chip resilience pattern, at individual-photo granularity
+   * (this drawer already renders one thumbnail per staged file, unlike
+   * EntryPage's single count+retry chip). Once every staged photo has
+   * uploaded, the save flow is finally complete — proceeds to onSaved(). */
+  async function retryStagedPhoto(index: number) {
+    const file = stagedPhotos[index];
+    if (!file || !createdRowId) return;
+    setPhotoBusy(true);
+    const outcome = await attemptStagedUpload(createdRowId, file);
+    setPhotoBusy(false);
+    if (outcome !== "ok") return;
+    const next = stagedPhotos.filter((_, i) => i !== index);
+    setStagedPhotos(next);
+    if (next.length === 0) {
+      setPhotoError(null);
+      onSaved();
+    } else {
+      setPhotoError(AP_VALIDATION.stagedPhotosNotUploaded(next.length));
+    }
+  }
+
   function addStagedFiles(files: FileList | File[] | null) {
     if (!files) return;
     const list = Array.from(files);
-    if (list.length > 0) setStagedPhotos((prev) => [...prev, ...list]);
+    if (list.length === 0) return;
+    // BLOCKER 2 fix: a cheap staging-time pre-check so most failures surface
+    // immediately instead of only after Save — uses the SAME shared
+    // allow-list function the server's upload gate does
+    // (src/shared/apTypes.ts's apPhotoExtForFilename), so client and server
+    // can never silently disagree about what counts as an accepted photo.
+    // This is a hint, not a guarantee: the server still enforces both checks
+    // authoritatively.
+    const accepted: File[] = [];
+    let rejected: "size" | "type" | null = null;
+    for (const file of list) {
+      if (file.size > STAGED_PHOTO_MAX_BYTES) {
+        rejected = rejected ?? "size";
+        continue;
+      }
+      if (!apPhotoExtForFilename(file.name)) {
+        rejected = rejected ?? "type";
+        continue;
+      }
+      accepted.push(file);
+    }
+    if (accepted.length > 0) setStagedPhotos((prev) => [...prev, ...accepted]);
+    if (rejected === "size") setPhotoError(AP_VALIDATION.photoTooLarge);
+    else if (rejected === "type") setPhotoError(AP_VALIDATION.photoUnsupportedType);
   }
 
   async function handleAddFiles(files: FileList | null) {
@@ -659,17 +772,41 @@ export function ApRowDrawer({ row, creditors, onClose, onSaved, onDeleted, onPay
                       {stagedPhotos.map((file, index) => (
                         <div key={`${file.name}-${index}`} className="flex flex-col items-center gap-1">
                           <img
-                            src={URL.createObjectURL(file)}
+                            src={stagedPhotoUrls[index]}
                             alt=""
                             className="h-16 w-16 rounded-md border border-line object-cover"
                           />
-                          <button
-                            type="button"
-                            onClick={() => setStagedPhotos((prev) => prev.filter((_, i) => i !== index))}
-                            className="text-xs text-bad hover:underline"
-                          >
-                            {PHOTO.remove}
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const next = stagedPhotos.filter((_, i) => i !== index);
+                                setStagedPhotos(next);
+                                // BLOCKER 2 fix: once the row is already
+                                // created (a prior save hit a photo
+                                // failure) and the clerk removes the last
+                                // still-unsent photo instead of retrying
+                                // it, the save flow is finally complete.
+                                if (createdRowId && next.length === 0) {
+                                  setPhotoError(null);
+                                  onSaved();
+                                }
+                              }}
+                              className="text-xs text-bad hover:underline"
+                            >
+                              {PHOTO.remove}
+                            </button>
+                            {createdRowId && (
+                              <button
+                                type="button"
+                                onClick={() => void retryStagedPhoto(index)}
+                                disabled={photoBusy}
+                                className="text-xs font-medium text-brand-500 hover:underline disabled:opacity-50"
+                              >
+                                {PHOTO.retry}
+                              </button>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </div>

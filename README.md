@@ -235,7 +235,10 @@ not-yet-addressed follow-up outside this repo.)*
   volume also holds every AP row's own รูปบิล (bill/invoice photos) under
   `/app/data/ap-photos/<rowId>/<photoId>.<ext>` — the whole-directory `tar`
   above already covers them alongside `ap.db`, no separate backup step
-  needed.
+  needed. Photo growth will inflate this 14-day full-tar retention over time
+  (plausibly several GB/year at real usage, since every full `tar` captures
+  every still-retained photo again) — watch free space on evergreen as รูปบิล
+  adoption grows.
 
 Restoring either volume: stop the affected container, extract the chosen
 archive over the volume's data directory (`docker run --rm -v

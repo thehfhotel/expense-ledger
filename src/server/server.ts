@@ -922,7 +922,17 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       if (!(file instanceof Blob)) return json(400, { error: "missing picture field" });
       if (file.size > apStore.AP_PHOTO_MAX_BYTES) return json(413, { error: "photo too large" });
 
-      const ext = apStore.extForApPhotoContentType(file.type);
+      // BLOCKER 1 fix: gates on the FILENAME, never `file.type` — Bun's
+      // req.formData() discards the multipart part's declared Content-Type
+      // and synthesizes `file.type` from the filename's extension,
+      // lowercase-only, so trusting it here would silently 415 real photos
+      // named with an uppercase extension (DCF cameras, Windows scanners).
+      // See src/shared/apTypes.ts's apPhotoExtForFilename for the full
+      // rationale. A part with no filename at all (not a File) has nothing
+      // to derive an extension from, so it 415s the same as any other
+      // unsupported name.
+      const filename = file instanceof File ? file.name : "";
+      const ext = apStore.extForApPhotoFilename(filename);
       if (!ext) return json(415, { error: "unsupported photo type" });
 
       const photo = await apStore.createApPhoto(rowId, {
@@ -948,7 +958,17 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
       if (!record) return json(404, { error: "not found" });
       const file = apStore.apPhotoFile(record);
       if (!(await file.exists())) return json(404, { error: "not found" });
-      return new Response(file, { headers: { "content-type": apStore.contentTypeForApPhotoExt(record.ext) } });
+      return new Response(file, {
+        headers: {
+          "content-type": apStore.contentTypeForApPhotoExt(record.ext),
+          // CHEAP FOLD c: a photo's bytes are immutable per id (server-
+          // generated crypto.randomUUID(), never reused/overwritten) — safe
+          // to cache long-term, killing the re-download-on-every-drawer-open
+          // cost. `private` since this route is gated by identify() above,
+          // not a publicly cacheable asset.
+          "cache-control": "private, max-age=31536000, immutable",
+        },
+      });
     });
   }
 
@@ -1004,7 +1024,11 @@ if (isProd && !existsSync(indexPath)) {
 // not when imported by the test suite.
 if (import.meta.main) {
   if (isProd) {
-    const server = Bun.serve({ port, fetch: fetchHandler });
+    // CHEAP FOLD d: an explicit, tighter bound than Bun's own 128 MiB
+    // default — belt-and-braces against unbounded request-body buffering,
+    // comfortably above the 10 MiB AP photo cap (apStore.AP_PHOTO_MAX_BYTES)
+    // plus normal multipart/JSON overhead.
+    const server = Bun.serve({ port, fetch: fetchHandler, maxRequestBodySize: 32 * 1024 * 1024 });
     console.log(`▶︎ http://localhost:${server.port} (prod)`);
   } else {
     // Dev: HTML import lets Bun bundle the React client on the fly with HMR
@@ -1015,6 +1039,8 @@ if (import.meta.main) {
     const server = Bun.serve({
       port,
       development: true,
+      // CHEAP FOLD d: same explicit cap as the prod branch above.
+      maxRequestBodySize: 32 * 1024 * 1024,
       routes: {
         "/": indexHtml,
         "/entry": indexHtml,

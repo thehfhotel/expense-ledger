@@ -333,3 +333,40 @@ export function apPhotoUrl(photoId: string): string {
 export function apRowPhotoCount(photos: readonly { id: string }[]): number | null {
   return photos.length > 0 ? photos.length : null;
 }
+
+/**
+ * Filename extension (case-insensitive) -> canonical stored ext, or null when
+ * unsupported. The ONE allow-list both the client's staging-time pre-check
+ * (src/client/components/ApRowDrawer.tsx, BLOCKER 2 fix) and the server's
+ * upload gate (src/server/apStore.ts's extForApPhotoFilename) apply — kept
+ * here, shared, so neither side can silently drift from the other about what
+ * "an accepted photo" means.
+ *
+ * BLOCKER 1 fix (2026-07): this is keyed on the FILENAME, never a
+ * Blob/File's `type` — Bun's req.formData() (oven/bun 1.3.x, pinned in this
+ * repo's Dockerfile) discards a multipart part's DECLARED Content-Type
+ * entirely and instead synthesizes `file.type` from the filename's own
+ * extension, LOWERCASE ONLY (confirmed directly against this exact Bun
+ * version — a part named "IMG_0002.JPG" comes back with `file.type === ""`
+ * regardless of what Content-Type the client declared). DCF cameras and
+ * Windows scanners routinely emit uppercase extensions (IMG_0002.JPG,
+ * scan.JPEG, DSC_0001.PNG), so gating on `file.type` 415'd every one of those
+ * while silently accepting the exact same bytes under a lowercase name.
+ * Deriving acceptance from the filename here instead, explicitly and
+ * case-insensitively, pins it to logic this repo owns rather than an
+ * incidental Bun implementation detail a future version could flip either
+ * direction.
+ *
+ * RULING 3 (2026-07, owner decision): HEIC is deliberately NOT accepted —
+ * browsers cannot render a stored HEIC file back to the clerk, and a
+ * silently-broken bill photo is worse than a loud rejection at upload time.
+ */
+export function apPhotoExtForFilename(filename: string): string | null {
+  const dot = filename.lastIndexOf(".");
+  if (dot === -1 || dot === filename.length - 1) return null;
+  const rawExt = filename.slice(dot + 1).toLowerCase();
+  if (rawExt === "jpg" || rawExt === "jpeg") return "jpg";
+  if (rawExt === "png") return "png";
+  if (rawExt === "webp") return "webp";
+  return null;
+}

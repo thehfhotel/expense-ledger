@@ -142,6 +142,12 @@ export function ApPage({ filter }: Props) {
   }
   function closeDrawer() {
     setDrawerMode(null);
+    // CHEAP FOLD b: a photo attached/removed from WITHIN an edit-mode
+    // drawer (uploads happen immediately, independent of บันทึก) left the
+    // register's own รูปบิล (N) count chip stale until the next unrelated
+    // refetch — refetch here too, same as onSaved/onDeleted below, so
+    // closing via ปิด/ยกเลิก or Escape never leaves it behind.
+    void fetchRows();
   }
   function flash(id: string) {
     setHighlightId(id);
@@ -329,7 +335,10 @@ export function ApPage({ filter }: Props) {
                       ฿{formatSatang(row.outstandingSatang)}
                     </span>
                     <span className="tabular-nums text-ink">{row.dueDate ? isoToBuddhist(row.dueDate) : EMPTY_VALUE}</span>
-                    <span className="min-w-0 truncate text-ink-muted">{row.entity || EMPTY_VALUE}</span>
+                    {/* Owner rule (CHEAP FOLD a) — same no-clipping treatment
+                        as creditor/item above: ในนาม wraps instead of
+                        truncating. */}
+                    <span className="min-w-0 break-words text-ink-muted">{row.entity || EMPTY_VALUE}</span>
                     <span>
                       {isSettled ? (
                         <span className="text-xs font-medium text-ok">
@@ -453,14 +462,12 @@ export function ApPage({ filter }: Props) {
           row={editingRow}
           creditors={data?.creditors ?? []}
           onClose={closeDrawer}
-          onSaved={() => {
-            closeDrawer();
-            void fetchRows();
-          }}
-          onDeleted={() => {
-            closeDrawer();
-            void fetchRows();
-          }}
+          // CHEAP FOLD b: closeDrawer already refetches (see above), so
+          // onSaved/onDeleted no longer need their own separate fetchRows
+          // call — one place does both jobs instead of three call sites
+          // each doing them slightly differently.
+          onSaved={closeDrawer}
+          onDeleted={closeDrawer}
           onPaymentChanged={() => void fetchRows()}
         />
       )}

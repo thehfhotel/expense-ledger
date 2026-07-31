@@ -1381,13 +1381,74 @@ describe("AP register: row photos (รูปบิล)", () => {
     expect(res.status).toBe(400);
   });
 
-  test("415s an unsupported content type, before writing anything to disk", async () => {
+  // BLOCKER 1 fix: this test used to be titled "415s an unsupported content
+  // type" and passed a mismatched declared Content-Type ("application/pdf")
+  // ALONGSIDE a matching ".pdf" filename — false confidence, since it never
+  // proved which of the two the rejection actually came from. The gate now
+  // derives acceptance from the FILENAME alone (see extForApPhotoFilename,
+  // src/shared/apTypes.ts) — the declared type below is deliberately
+  // "image/jpeg" (a type that WOULD be accepted) to prove the filename is
+  // what's actually driving the 415, not whatever Content-Type was declared.
+  // NOTE on the byte content below: a plain `new Uint8Array(4)` (all-zero
+  // bytes) round-trips through FormData -> Request -> req.formData() with
+  // its filename lost (Bun 1.3.9 quirk affecting only very small/all-zero
+  // multipart part bodies — verified directly; a real photo upload is never
+  // this small so production is unaffected). Every test below that needs
+  // the FILENAME to survive that round-trip uses a small non-zero-starting
+  // byte array instead.
+  test("415s an unsupported filename extension (bill.pdf), before writing anything to disk", async () => {
     const rowId = await seedRow();
     const res = await fetchHandler(
-      photoUploadRequest(rowId, new Blob([new Uint8Array(4)], { type: "application/pdf" }), "bill.pdf"),
+      photoUploadRequest(rowId, new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/jpeg" }), "bill.pdf"),
     );
     expect(res.status).toBe(415);
     expect(await res.json()).toEqual({ error: "unsupported photo type" });
+  });
+
+  test("415s an extensionless filename with the same unsupported-type message", async () => {
+    const rowId = await seedRow();
+    const res = await fetchHandler(
+      photoUploadRequest(rowId, new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/jpeg" }), "noext"),
+    );
+    expect(res.status).toBe(415);
+    expect(await res.json()).toEqual({ error: "unsupported photo type" });
+  });
+
+  // RULING 3 (2026-07, owner decision): HEIC dropped entirely — browsers
+  // cannot render a stored HEIC file back to the clerk.
+  test("415s a .heic/.HEIC filename", async () => {
+    const rowId = await seedRow();
+    for (const filename of ["bill.heic", "bill.HEIC"]) {
+      const res = await fetchHandler(
+        photoUploadRequest(rowId, new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/heic" }), filename),
+      );
+      expect(res.status).toBe(415);
+      expect(await res.json()).toEqual({ error: "unsupported photo type" });
+    }
+  });
+
+  // BLOCKER 1 fix: proves acceptance is driven by the FILENAME, case-
+  // insensitively, never by the declared Content-Type — a real DCF
+  // camera/Windows scanner upload names its file this way (IMG_0002.JPG,
+  // scan.JPEG, DSC_0001.PNG) and Bun's own req.formData() would otherwise
+  // synthesize an empty file.type for every one of these (lowercase-only
+  // sniffing), which used to 415 them under the old file.type-based gate.
+  test("accepts uppercase .JPG/.JPEG/.PNG/.WEBP filenames, storing the canonical lowercase ext", async () => {
+    const rowId = await seedRow();
+    const cases: Array<[string, string]> = [
+      ["IMG_0002.JPG", "jpg"],
+      ["scan.JPEG", "jpg"],
+      ["DSC_0001.PNG", "png"],
+      ["photo.WEBP", "webp"],
+    ];
+    for (const [filename, expectedExt] of cases) {
+      const res = await fetchHandler(
+        photoUploadRequest(rowId, new Blob([new Uint8Array([1, 2, 3])], { type: "" }), filename),
+      );
+      expect(res.status).toBe(201);
+      const { id } = (await res.json()) as { id: string };
+      expect(existsSync(apStore._apPhotoFilePathForTests(rowId, id, expectedExt))).toBe(true);
+    }
   });
 
   test("413s a file over the 10 MiB cap", async () => {

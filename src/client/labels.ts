@@ -257,8 +257,17 @@ export const AP_VALIDATION = {
    * ap_store_error fallback so an oversized file reads as a validation
    * problem, not a system failure. */
   photoTooLarge: "ไฟล์รูปใหญ่เกินไป (จำกัดไม่เกิน 10 MB)",
-  /** Same route's 415. */
-  photoUnsupportedType: "ไม่รองรับไฟล์ประเภทนี้ — ใช้ได้เฉพาะ JPEG, PNG, WEBP หรือ HEIC",
+  /** Same route's 415. RULING 3 (2026-07, owner decision): HEIC dropped
+   * entirely — browsers cannot render a stored HEIC file back to the clerk,
+   * so this no longer lists it as accepted. */
+  photoUnsupportedType: "ไม่รองรับไฟล์ประเภทนี้ — ใช้ได้เฉพาะ JPEG, PNG, WEBP",
+  /** BLOCKER 2 fix: shown in the add-mode drawer when >= 1 staged photo
+   * didn't make it up after the row itself was already saved (an explicit
+   * upload failure, or one never attempted because a SessionExpiredError cut
+   * the loop short) — the drawer stays open with a retry affordance per
+   * photo instead of closing and leaving the clerk unable to tell a lost
+   * photo from a saved one. */
+  stagedPhotosNotUploaded: (n: number) => `รูปบิล ${n} รูปยังไม่ได้แนบ - ลองใหม่อีกครั้ง`,
 };
 
 export const AP_ENTITIES = ["บจก.สายชล เฮอริเทจ", "HF Ville", "HF", "SCM", "บจก.สายชล เฮอริเทจ ทหารไทย"];

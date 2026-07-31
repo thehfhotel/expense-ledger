@@ -27,7 +27,7 @@ import {
   deleteApPhotoFile,
   deleteApPhotoRowDir,
   deleteApRow,
-  extForApPhotoContentType,
+  extForApPhotoFilename,
   getApPayment,
   getApPhotoRecord,
   getApRow,
@@ -507,26 +507,36 @@ describe("AP row photos", () => {
     return new Blob([new Uint8Array(bytes)], { type: "image/jpeg" });
   }
 
-  describe("content-type <-> ext allow-list", () => {
-    test("accepts jpeg/png/webp/heic and strips a boundary-style parameter", () => {
-      expect(extForApPhotoContentType("image/jpeg")).toBe("jpg");
-      expect(extForApPhotoContentType("image/png")).toBe("png");
-      expect(extForApPhotoContentType("image/webp")).toBe("webp");
-      expect(extForApPhotoContentType("image/heic")).toBe("heic");
-      expect(extForApPhotoContentType("IMAGE/JPEG; charset=binary")).toBe("jpg");
+  describe("filename -> ext allow-list (BLOCKER 1 / RULING 3)", () => {
+    test("accepts jpg/jpeg/png/webp case-insensitively, mapped to a canonical lowercase ext", () => {
+      // BLOCKER 1: DCF cameras and Windows scanners routinely emit uppercase
+      // extensions — gating on the FILENAME (never Bun's file.type) must
+      // accept these exactly like their lowercase equivalents.
+      expect(extForApPhotoFilename("bill.jpg")).toBe("jpg");
+      expect(extForApPhotoFilename("bill.jpeg")).toBe("jpg");
+      expect(extForApPhotoFilename("bill.png")).toBe("png");
+      expect(extForApPhotoFilename("bill.webp")).toBe("webp");
+      expect(extForApPhotoFilename("IMG_0002.JPG")).toBe("jpg");
+      expect(extForApPhotoFilename("scan.JPEG")).toBe("jpg");
+      expect(extForApPhotoFilename("DSC_0001.PNG")).toBe("png");
+      expect(extForApPhotoFilename("photo.WEBP")).toBe("webp");
     });
 
-    test("rejects anything off the allow-list", () => {
-      expect(extForApPhotoContentType("application/pdf")).toBeNull();
-      expect(extForApPhotoContentType("text/plain")).toBeNull();
-      expect(extForApPhotoContentType("image/heif")).toBeNull();
+    test("rejects an extensionless filename and anything off the allow-list", () => {
+      expect(extForApPhotoFilename("noext")).toBeNull();
+      expect(extForApPhotoFilename("trailing.")).toBeNull();
+      expect(extForApPhotoFilename("bill.pdf")).toBeNull();
+      expect(extForApPhotoFilename("bill.txt")).toBeNull();
+      // RULING 3 (2026-07, owner decision): HEIC dropped entirely.
+      expect(extForApPhotoFilename("bill.heic")).toBeNull();
+      expect(extForApPhotoFilename("bill.HEIC")).toBeNull();
     });
 
-    test("contentTypeForApPhotoExt is the inverse for every allowed ext", () => {
+    test("contentTypeForApPhotoExt is the inverse for every allowed ext; HEIC no longer maps to anything", () => {
       expect(contentTypeForApPhotoExt("jpg")).toBe("image/jpeg");
       expect(contentTypeForApPhotoExt("png")).toBe("image/png");
       expect(contentTypeForApPhotoExt("webp")).toBe("image/webp");
-      expect(contentTypeForApPhotoExt("heic")).toBe("image/heic");
+      expect(contentTypeForApPhotoExt("heic")).toBe("application/octet-stream");
     });
 
     test("an unknown ext falls back to a generic binary content-type rather than throwing", () => {
