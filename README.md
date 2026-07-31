@@ -91,6 +91,10 @@ production value (see "Gotchas" below) before step 3 mints a token — rotating
 the secret key invalidates every previously issued token, so a token minted
 before the key is finalized stops working the moment the key changes.
 
+The single ledger account's username and password live on evergreen at
+`/home/deploy/expense-ledger-production/.admin-credentials` (root:root, mode
+600) — never in this repo, never as a GitHub secret.
+
 1. On evergreen, temporarily flip registration on and restart just the
    engine: `EBK_USER_ENABLE_REGISTER=true docker compose up -d engine` (or
    edit the deployed `.env` and re-run `docker compose up -d engine`, then
