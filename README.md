@@ -209,6 +209,45 @@ receipt-photo upload, wrapped by `src/server/engine.ts`'s
   and bounded by `user.max_transaction_picture_size` (default 10 MiB) in the
   engine's own config — both untouched by this repo, upstream defaults.
 
+The frontend's `src/server/engine.ts` also wraps the following, verified the
+same way (tag `v1.6.1`) and cross-checked against `scripts/lib/ezbk-client.ts`
+(the migration scripts' independently-sourced client, which cites
+`pkg/models/transaction.go`, `transaction_category.go`, `account.go` and
+`pkg/core/context_web.go` directly):
+
+- **Month transaction list**: `GET /api/v1/transactions/list/by_month.json?
+  year=&month=&type=3` returns the WHOLE month in one call (no page/count
+  cap) — unlike the general `transactions/list.json`, which caps at 50 and
+  needs a page loop. `type=3` is `TRANSACTION_TYPE_EXPENSE` (the
+  `pkg/models/transaction.go` enum: `MODIFY_BALANCE=1, INCOME=2, EXPENSE=3,
+  TRANSFER=4`).
+- **Categories**: `GET /api/v1/transaction/categories/list.json?type=2`
+  (`CATEGORY_TYPE_EXPENSE=2` — a SEPARATE enum from the transaction type
+  above, `pkg/models/transaction_category.go`: `INCOME=1, EXPENSE=2,
+  TRANSFER=3`) returns a response **keyed by stringified category type**
+  (`result["2"]`), each entry a primary category with a nested
+  `subCategories[]`. This app's 21 leaves are seeded (`scripts/seed.ts`) as
+  one secondary per `src/shared/categories.ts` group — named by `building`
+  for the three building-scoped groups (water/electricity/phone) or by the
+  same label as the primary otherwise — so `engine.ts` matches on
+  `(primary.name === label, secondary.name === building ?? label)`, never a
+  hardcoded id.
+- **Accounts**: `GET /api/v1/accounts/list.json` — `category` is a plain
+  numeric `AccountCategory` enum (`pkg/models/account.go`: `CASH=1,
+  CHECKING=2`); this app's two seeded accounts (เงินสด / ธนาคาร) are matched
+  on that field, not by name.
+- **Create/modify/delete**: `POST /transactions/add.json` /
+  `/transactions/modify.json` / `/transactions/delete.json`. Modify is a
+  FULL OVERWRITE (every field required, not a patch) — `engine.ts` fetches
+  the current transaction (`GET /transactions/get.json?id=`) before any
+  single-field edit or photo attach/detach so untouched fields are resent
+  unchanged. `time` is Unix seconds; `sourceAmount` is the smallest currency
+  unit, numerically identical to this app's own satang for THB.
+- **Timezone headers**: `X-Timezone-Name` (e.g. `Asia/Bangkok`) and
+  `X-Timezone-Offset` (minutes, `420` for Bangkok) are sent on every call —
+  `pkg/core/context_web.go`'s `GetClientTimezone()` is consulted broadly
+  across transaction/account endpoints and errors without a resolvable one.
+
 Full HTTP API reference: <https://ezbookkeeping.mayswind.net/httpapi/>.
 
 ## Gotchas
