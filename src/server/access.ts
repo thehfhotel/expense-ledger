@@ -1,5 +1,5 @@
 // Auth for Expense Ledger. Adapted from income-ledger's src/server/auth.ts
-// (same estate pattern — see /Users/nut/income-ledger).
+// (same estate pattern — see /Users/nut/HF/income-ledger).
 //
 // identify(req) resolves the caller to an Identity or null:
 //   - development ONLY (NODE_ENV === "development"): DEV_USER env bypass.

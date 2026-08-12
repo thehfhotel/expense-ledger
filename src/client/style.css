@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
-/* HF One tokens — canonical values in ~/HF-erp/design/HF-ONE.md and
-   ~/HF-erp/public/shell/hf.css. Copied here per that contract (each estate
+/* HF One tokens — canonical values in ~/HF/HF-erp/design/HF-ONE.md and
+   ~/HF/HF-erp/public/shell/hf.css. Copied here per that contract (each estate
    app carries its own local copy) — copied wholesale from income-ledger's
    src/client/style.css, this app's sibling. Never use Tailwind's
    slate/gray palette — burgundy/gold/stone only. */
