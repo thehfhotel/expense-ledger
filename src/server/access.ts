@@ -19,10 +19,12 @@
 // is weak.
 //
 // Because of the LAN-path case above, ACCESS_AUD MUST be non-empty in
-// production: with it unset, verifyAccessJwt skips the aud check entirely,
-// so a valid Cloudflare Access JWT issued for ANY app under the team domain
-// (not just this one) would pass identify() here. issuer/signature/expiry
-// are still verified either way.
+// production, and verifyAccessJwt ENFORCES that rather than trusting the
+// deployment to get it right: an audience is what narrows a token to THIS
+// app, so without one the only remaining questions are issuer, signature
+// and expiry — which every app under the team domain answers identically.
+// An unset ACCESS_AUD in production therefore rejects every request
+// (fail-closed) instead of accepting a wider audience than intended.
 //
 // Dormant-when-unset: with no `cf-access-jwt-assertion` header (e.g. a
 // direct request that never went through Access) identify() simply returns
@@ -51,8 +53,32 @@ async function jwksKeys(): Promise<Json[]> {
   return jwksCache.keys;
 }
 
-/** Verify a CF Access JWT; returns its payload or null. */
+let loggedMissingAudInProd = false;
+
+/** Verify a CF Access JWT; returns its payload or null.
+ *
+ * The ACCESS_AUD requirement documented in the file header is enforced
+ * HERE, and deliberately FIRST — before any parsing and before any JWKS
+ * network work — so a production deployment whose ACCESS_AUD has not been
+ * materialized (e.g. a fresh container brought up before its secret is in
+ * place) rejects every request outright rather than falling back to a
+ * weaker check. Never fires outside `NODE_ENV=production`: dev and test
+ * rely on the DEV_USER bypass in `identify()` below, which never reaches
+ * this function. Logged once per process, not once per request, so a
+ * misconfigured deploy does not drown its own logs. */
 export async function verifyAccessJwt(token: string): Promise<Json | null> {
+  const wantAud = (process.env.ACCESS_AUD || "")
+    .split(",")
+    .map((s2) => s2.trim())
+    .filter(Boolean);
+  if (process.env.NODE_ENV === "production" && wantAud.length === 0) {
+    if (!loggedMissingAudInProd) {
+      loggedMissingAudInProd = true;
+      console.error("access: ACCESS_AUD is unset in production — refusing every request until it is configured (fail-closed, not fail-open)");
+    }
+    return null;
+  }
+
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [h, p, s] = parts;
@@ -85,10 +111,6 @@ export async function verifyAccessJwt(token: string): Promise<Json | null> {
   if (typeof payload.exp === "number" && payload.exp < now) return null;
   if (typeof payload.nbf === "number" && payload.nbf > now + 60) return null;
   if (payload.iss !== `https://${TEAM_DOMAIN()}`) return null;
-  const wantAud = (process.env.ACCESS_AUD || "")
-    .split(",")
-    .map((s2) => s2.trim())
-    .filter(Boolean);
   if (wantAud.length) {
     const got = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
     if (!got.some((a: string) => wantAud.includes(a))) return null;
@@ -107,3 +129,13 @@ export async function identify(req: Request): Promise<Identity | null> {
   if (!payload?.email) return null;
   return { email: String(payload.email).toLowerCase() };
 }
+
+// Test-only handle — same idiom as engine.ts's `_internal`.
+export const _internal = {
+  resetJwksCacheForTests(): void {
+    jwksCache = undefined;
+  },
+  resetLoggedMissingAudForTests(): void {
+    loggedMissingAudInProd = false;
+  },
+};
