@@ -1,5 +1,13 @@
 # Expense Ledger
 
+> **Archived 2026-08-13.** This repo was absorbed as a subtree, with full
+> history, into [`thehfhotel/hf-ledgers`](https://github.com/thehfhotel/hf-ledgers)
+> at `expense-ledger/`, and is now read-only. File issues and open PRs
+> against `hf-ledgers` instead. See hf-erp
+> `docs/adr/0006-repos-group-by-change-not-audience.md` for the
+> consolidation rationale, and `hf-ledgers`' `tasks/consolidation.md` (in
+> the estate task board `hf-tasks`) for how the move was carried out.
+
 HF Hotel's company expense ledger: a custom Bun frontend backed by a headless
 [ezBookkeeping](https://ezbookkeeping.mayswind.net/) engine. Public repo — see
 CLAUDE.md's public-repo hygiene rule (no LAN IPs, no internal topology).
